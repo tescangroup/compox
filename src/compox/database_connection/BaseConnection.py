@@ -150,6 +150,30 @@ class BaseConnection:
         """
         raise NotImplementedError
 
+    def get_object_sizes(
+        self, collection_name: str, object_names: list[str]
+    ) -> list[int]:
+        """
+        Get object sizes in bytes for objects stored in a collection.
+
+        Parameters
+        ----------
+        collection_name : str
+            The collection name.
+        object_names : list[str]
+            The object names.
+
+        Returns
+        -------
+        list[int]
+            The list of object sizes in bytes.
+
+        Raises
+        ------
+        NotImplementedError
+        """
+        raise NotImplementedError
+
     def put_objects(
         self, collection_name: str, object_names: list[str], object: list[bytes] | list[str]
     ) -> None:

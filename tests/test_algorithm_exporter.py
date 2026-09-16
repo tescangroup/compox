@@ -12,13 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from compox.algorithm_utils.AlgorithmExporter import (
-    AlgorithmExporter,
-    AlgorithmNotFoundError,
-    MinorVersionNotFoundError,
-    CheckpointNotFoundError,
-)
+from compox.algorithm_utils.AlgorithmExporter import AlgorithmExporter
 from compox.database_connection.InMemoryConnection import InMemoryConnection
+from compox.exceptions import CompoxNotFoundError
 
 
 def _make_module_zip_bytes(module_id: str) -> bytes:
@@ -232,25 +228,28 @@ def test_export_algorithm_errors(db_with_algorithm, tmp_path):
     """Raises the right errors for missing algorithm/minor/checkpoint."""
     exporter = AlgorithmExporter(db_with_algorithm)
 
-    with pytest.raises(AlgorithmNotFoundError):
+    with pytest.raises(CompoxNotFoundError) as missing_algorithm_exc:
         exporter.export_algorithm_to_zip(
             algorithm_name="missing",
             algorithm_major_version="1",
             target_zip_path=str(tmp_path / "missing.zip"),
         )
+    assert missing_algorithm_exc.value.code == "algorithm_not_found"
 
-    with pytest.raises(MinorVersionNotFoundError):
+    with pytest.raises(CompoxNotFoundError) as missing_minor_exc:
         exporter.export_algorithm_to_zip(
             algorithm_name="my_algo",
             algorithm_major_version="1",
             algorithm_minor_version="99",
             target_zip_path=str(tmp_path / "missing_minor.zip"),
         )
+    assert missing_minor_exc.value.code == "minor_version_not_found"
 
-    with pytest.raises(CheckpointNotFoundError):
+    with pytest.raises(CompoxNotFoundError) as missing_checkpoint_exc:
         exporter.export_algorithm_to_zip(
             algorithm_name="my_algo",
             algorithm_major_version="1",
             target_zip_path=str(tmp_path / "missing_chk.zip"),
             algorithm_checkpoint_id="nope",
         )
+    assert missing_checkpoint_exc.value.code == "checkpoint_not_found"

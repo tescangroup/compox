@@ -4,9 +4,9 @@ All rights reserved
 """
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
 from urllib.parse import urlparse, urlunparse
 from compox.pydantic_models import ResponseMessage, UrlResponse
+from compox.exceptions import CompoxFileError, CompoxNotFoundError
 
 router = APIRouter(prefix="/api/v1/files", tags=["file-controller"])
 
@@ -45,10 +45,12 @@ async def get_upload_url(object_name: str, request: Request) -> UrlResponse:
         )
         return UrlResponse(url=url)
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Failed to get upload URL: {e}"},
-        )
+        raise CompoxFileError(
+            "Failed to get upload URL.",
+            code="file_upload_url_failed",
+            details={"object_name": object_name},
+            cause=e,
+        ) from e
 
 
 @router.get(
@@ -85,9 +87,10 @@ async def get_download_url(object_name: str, request: Request) -> UrlResponse:
         )
 
         if not objects_exist[0]:
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "File not found"},
+            raise CompoxNotFoundError(
+                "File not found",
+                code="file_not_found",
+                details={"object_name": object_name},
             )
 
         url = rewrite_s3_url(
@@ -97,11 +100,15 @@ async def get_download_url(object_name: str, request: Request) -> UrlResponse:
             settings.storage.backend_settings.s3_domain_name,
         )
         return UrlResponse(url=url)
+    except CompoxNotFoundError:
+        raise
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Failed to get download URL: {e}"},
-        )
+        raise CompoxFileError(
+            "Failed to get download URL.",
+            code="file_download_url_failed",
+            details={"object_name": object_name},
+            cause=e,
+        ) from e
 
 
 @router.delete(
@@ -138,15 +145,23 @@ async def delete_dataset(object_name: str, request: Request) -> ResponseMessage:
         )
 
         if not objects_exist[0]:
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "File not found"},
+            raise CompoxNotFoundError(
+                "File not found",
+                code="file_not_found",
+                details={"object_name": object_name},
             )
 
         database_connection.delete_objects("data-store", [object_name])
-        return JSONResponse(status_code=200, content={})
-    except Exception as _:
-        return JSONResponse(status_code=500, content={})
+        return ResponseMessage(detail="File deleted successfully")
+    except CompoxNotFoundError:
+        raise
+    except Exception as e:
+        raise CompoxFileError(
+            "Failed to delete file.",
+            code="file_delete_failed",
+            details={"object_name": object_name},
+            cause=e,
+        ) from e
 
 
 def rewrite_s3_url(url: str, domain: str | None) -> str:

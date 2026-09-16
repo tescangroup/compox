@@ -3,8 +3,11 @@ Copyright 2024 TESCAN 3DIM, s.r.o.
 All rights reserved
 """
 
-import boto3
+import base64
+import hashlib
 import time
+
+import boto3
 from loguru import logger
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -88,6 +91,10 @@ class S3Connection(BaseConnection):
             region_name=region_name,
             config=config,
         )
+        self.s3_client.meta.events.register(
+            "before-call.s3.PutBucketLifecycleConfiguration",
+            self._add_content_md5_header,
+        )
         self.s3 = boto3.resource(
             "s3",
             endpoint_url=endpoint_url,
@@ -98,6 +105,8 @@ class S3Connection(BaseConnection):
         )
         self.region_name = region_name
         self.post_data_retries = 5
+        self.post_data_retry_initial_delay = 0.1
+        self.post_data_retry_max_delay = 2.0
         self.uploader = S3FileUploader(self.s3_client)
         self.data_store_expire_days = data_store_expire_days
         self.execution_store_expire_days = execution_store_expire_days
@@ -107,6 +116,39 @@ class S3Connection(BaseConnection):
         self.collection_prefix = (
             f"{collection_prefix}" if collection_prefix else ""
         )
+
+    @staticmethod
+    def _add_content_md5_header(params: dict, **kwargs) -> None:
+        """
+        Add Content-MD5 to lifecycle requests for S3-compatible stores.
+
+        Recent botocore versions may use flexible checksum headers instead of
+        Content-MD5. MinIO still requires Content-MD5 for bucket lifecycle
+        configuration requests, so add it after botocore has serialized the XML
+        body and before the request is signed and sent.
+        """
+        headers = params.setdefault("headers", {})
+        if any(name.lower() == "content-md5" for name in headers):
+            return
+
+        body = params.get("body")
+        if body is None:
+            return
+
+        if isinstance(body, str):
+            body_bytes = body.encode("utf-8")
+        elif isinstance(body, (bytes, bytearray)):
+            body_bytes = bytes(body)
+        else:
+            position = body.tell()
+            body_bytes = body.read()
+            body.seek(position)
+            if isinstance(body_bytes, str):
+                body_bytes = body_bytes.encode("utf-8")
+
+        headers["Content-MD5"] = base64.b64encode(
+            hashlib.md5(body_bytes).digest()
+        ).decode("ascii")
 
     def __reduce__(self):
         return (
@@ -383,6 +425,33 @@ class S3Connection(BaseConnection):
             objects.append(obj.get()["Body"].read())
         return objects
 
+    def get_object_sizes(
+        self, collection_name: str, object_names: list[str]
+    ) -> list[int]:
+        """
+        Get object sizes in bytes without downloading object bodies.
+
+        Parameters
+        ----------
+        collection_name : str
+            The collection name.
+        object_names : list[str]
+            The object keys.
+
+        Returns
+        -------
+        list[int]
+            The list of object sizes in bytes.
+        """
+        sizes = []
+        for object_key in object_names:
+            response = self.s3_client.head_object(
+                Bucket=f"{self.collection_prefix}{collection_name}",
+                Key=object_key,
+            )
+            sizes.append(int(response["ContentLength"]))
+        return sizes
+
     def put_objects(
         self,
         collection_name: str,
@@ -421,8 +490,13 @@ class S3Connection(BaseConnection):
                         # botocore.exceptions.ClientError: An error occurred (AccessDenied)
                         # when calling the PutObject operation: Access Denied.
                         # and retry the upload
-                        for j in range(self.post_data_retries):
-                            time.sleep(0.05)
+                        for retry_index in range(self.post_data_retries):
+                            retry_delay = min(
+                                self.post_data_retry_initial_delay
+                                * (2 ** retry_index),
+                                self.post_data_retry_max_delay,
+                            )
+                            time.sleep(retry_delay)
                             try:
                                 self.s3_client.put_object(
                                     Body=object[i],

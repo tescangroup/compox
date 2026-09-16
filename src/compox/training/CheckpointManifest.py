@@ -45,6 +45,14 @@ class CheckpointManifest(BaseModel):
     parent_algorithm_id: str = Field(
         ..., description="Parent algorithm identifier (UUID)."
     )
+    parent_algorithm_key: str | None = Field(
+        default=None,
+        description=(
+            "Parent algorithm storage key in algorithm-store. When present, "
+            "checkpoint registration can update the parent record without "
+            "rescanning the algorithm store."
+        ),
+    )
     training_id: str = Field(..., description="Training run identifier (UUID).")
     assets: Dict[str, str] = Field(
         ...,

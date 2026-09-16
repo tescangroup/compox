@@ -6,40 +6,10 @@ All rights reserved
 from __future__ import annotations
 
 import errno
-from typing import Any
 
 from botocore.exceptions import ClientError
 
-
-class CompoxStorageError(Exception):
-    """
-    Base exception for normalized Compox storage backend failures.
-
-    Parameters
-    ----------
-    code : str
-        Stable machine-readable failure code.
-    message : str
-        Human-readable error message.
-    retryable : bool, optional
-        Whether retrying the operation is likely to succeed without intervention.
-    cause : Exception | None, optional
-        Original backend exception.
-    """
-
-    def __init__(
-        self,
-        *,
-        code: str,
-        message: str,
-        retryable: bool = False,
-        cause: Exception | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.retryable = retryable
-        self.cause = cause
+from compox.exceptions import CompoxStorageError
 
 
 class CompoxDiskFullError(CompoxStorageError):

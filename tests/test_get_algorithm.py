@@ -15,6 +15,8 @@ def test_basic_positive_get_algorithm(server_url):
     assert "algorithm_id" in response.json()
     assert "algorithm_name" in response.json()
     assert "algorithm_version" in response.json()
+    assert "storage_metrics" in response.json()
+    assert "logical_size_bytes" in response.json()["storage_metrics"]
     assert "latest_algorithm_minor_version" in response.json()
     assert "algorithm_minor_version" in response.json()
     assert (

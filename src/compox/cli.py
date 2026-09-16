@@ -14,7 +14,6 @@ from typing import Optional
 import requests
 from compox.config.server_settings import Settings
 from compox.algorithm_debug import app as debug_app
-from compox.config.server_settings import get_server_settings
 from compox.components.db_connection_builder import build_database_connection
 from compox.components.builtin_algorithm_importer import (
     BuiltinAlgorithmImporter,
@@ -562,7 +561,7 @@ def build_algorithm_bundle(
     """
     Build an encrypted Compox algorithm bundle from the configured storage backend.
     """
-    settings = get_server_settings(config_path=config, verbose=False)
+    settings = _load_settings_with_cli_overrides(config, [])
 
     minio_process = None
     if (
@@ -629,7 +628,7 @@ def import_algorithm_bundle(
     """
     Import an encrypted Compox algorithm bundle into the configured storage backend.
     """
-    settings = get_server_settings(config_path=config, verbose=False)
+    settings = _load_settings_with_cli_overrides(config, [])
     if bundle_path is not None:
         settings.storage.builtin_storage_bundle_path = bundle_path
     if key is not None:

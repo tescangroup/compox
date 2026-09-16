@@ -11,6 +11,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from compox.database_connection.exceptions import normalize_storage_error
+from compox.exceptions import CompoxError
+from compox.exceptions import error_metadata
+
 
 class EmergencyRecordStore:
     """
@@ -118,7 +122,13 @@ class EmergencyRecordStore:
         """
         payload = dict(record)
         if storage_error is not None:
-            payload["_emergency_storage_error"] = str(storage_error)
+            if isinstance(storage_error, Exception) and not isinstance(
+                storage_error, CompoxError
+            ):
+                storage_error = normalize_storage_error(
+                    storage_error, operation="fallback record source write"
+                )
+            payload.update(error_metadata(storage_error))
 
         path = self._record_path(collection_name, record_id)
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -13,6 +13,7 @@ from loguru import logger
 from compox.algorithm_utils.AlgorithmDeployer import AlgorithmDeployer
 from compox.database_connection.BaseConnection import BaseConnection
 from compox.internal.EmergencyRecordStore import EmergencyRecordStore
+from compox.exceptions import CompoxValidationError
 
 
 DEPLOY_COLLECTION = "deploy-store"
@@ -219,7 +220,11 @@ def deploy_task_fastapi(
         )
 
         if not os.path.exists(path):
-            raise FileNotFoundError(f"Path not found: {path}")
+            raise CompoxValidationError(
+                f"Path not found: {path}",
+                code="deploy_path_not_found",
+                details={"path": path},
+            )
 
         if os.path.isdir(path):
             deployer = AlgorithmDeployer(path)
@@ -290,7 +295,11 @@ def deploy_task_fastapi(
                 database_connection, algorithm_id
             )
         else:
-            raise ValueError("Path must be a directory or a .zip file.")
+            raise CompoxValidationError(
+                "Path must be a directory or a .zip file.",
+                code="invalid_deploy_path_type",
+                details={"path": path},
+            )
 
         _update_deploy_record(
             database_connection,

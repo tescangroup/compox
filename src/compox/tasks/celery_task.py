@@ -4,16 +4,17 @@ All rights reserved
 """
 
 import json
-from celery import shared_task, Task
 from datetime import datetime
-from loguru import logger
 from typing import Any
 
+from celery import shared_task, Task
+from loguru import logger
+
+from compox.internal.CUDAMemoryManager import CUDAMemoryManager
+from compox.pydantic_models import ExecutionRecord
+from compox.session.TaskSession import TaskSession
 from compox.tasks.TaskHandler import TaskHandler
 from compox.tasks.TaskHandler import TaskStoppedException
-from compox.internal.CUDAMemoryManager import CUDAMemoryManager
-from compox.session.TaskSession import TaskSession
-from compox.pydantic_models import ExecutionRecord
 
 
 @logger.catch
@@ -87,3 +88,4 @@ def execution_task_celery(
     )
 
     return execution_record
+

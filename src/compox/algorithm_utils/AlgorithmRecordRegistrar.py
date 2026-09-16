@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from compox.database_connection import BaseConnection
@@ -119,7 +119,9 @@ class AlgorithmRecordRegistrar:
             Newly composed algorithm record ready to be stored.
         """
         if timestamp is None:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
 
         return {
             "algorithm_id": algorithm_id,
@@ -168,7 +170,9 @@ class AlgorithmRecordRegistrar:
         modified_algorithm_json = copy.deepcopy(existing_algorithm_record)
         modified_algorithm_json.setdefault("algorithm_minor_version", {})
         if timestamp is None:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
 
         if "latest_algorithm_minor_version" not in modified_algorithm_json:
             modified_algorithm_json["latest_algorithm_minor_version"] = -1

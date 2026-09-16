@@ -19,6 +19,7 @@ from compox.database_connection.CompoxAlgorithmBundleConnection import (
     CompoxAlgorithmBundleConnection,
 )
 from compox.database_connection.InMemoryConnection import InMemoryConnection
+from compox.exceptions import CompoxBundleError
 
 
 def _make_settings(bundle_path: Path, bundle_key: str) -> SimpleNamespace:
@@ -433,14 +434,15 @@ def test_builtin_algorithm_importer_fails_hard_on_invalid_bundle_algorithm(
     try:
         importer.run_startup_migration()
         assert False, "Expected invalid bundled algorithm import to raise."
-    except RuntimeError:
-        pass
+    except CompoxBundleError as e:
+        assert e.code == "builtin_algorithm_import_failed"
 
     import_state = json.loads(
         target_db.get_objects("system-store", ["migration-state"])[0]
     )
     assert import_state["last_import_status"] == "FAILED"
     assert import_state["failed_algorithms"] == 1
+    assert import_state["error_code"] == "builtin_algorithm_import_failed"
     assert import_state["rollback_status"] == "COMPLETED"
     assert (
         target_db.check_objects_exist("algorithm-store", ["alg-1~my_algo~1"])[0]
@@ -604,13 +606,14 @@ def test_algorithm_bundle_end_to_end_rollback_on_failure(tmp_path):
     try:
         importer.run_startup_migration()
         assert False, "Expected broken filesystem bundle import to raise."
-    except RuntimeError:
-        pass
+    except CompoxBundleError as e:
+        assert e.code == "builtin_algorithm_import_failed"
 
     import_state = json.loads(
         target_db.get_objects("system-store", ["migration-state"])[0]
     )
     assert import_state["last_import_status"] == "FAILED"
+    assert import_state["error_code"] == "builtin_algorithm_import_failed"
     assert import_state["rollback_status"] == "COMPLETED"
     assert target_db.check_objects_exist("algorithm-store", ["alg-1~my_algo~1"])[0] is False
     assert target_db.check_objects_exist("module-store", ["module-1"])[0] is False

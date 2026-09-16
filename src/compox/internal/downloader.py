@@ -51,11 +51,12 @@ def get_minio(settings):
     # if the operating system is posix
     if os.name == "posix":
         # download minio binary
-        minio_url = "https://dl.min.io/server/minio/release/linux-amd64/minio"
+        minio_url = "https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/minio.linux-amd64.RELEASE.2025-09-07T16-13-09Z"
         if platform.system().lower() == "darwin":
-            minio_url = f"https://dl.min.io/server/minio/release/darwin-{platform.machine()}/minio"
+            minio_url = f"https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/minio.darwin-{platform.machine()}.RELEASE.2025-09-07T16-13-09Z"
         try:
             response = requests.get(minio_url)
+            response.raise_for_status()
         except requests.exceptions.RequestException as e:
             logger.error("Could not download the Minio binary due to: ", e)
             exit(1)
@@ -89,8 +90,9 @@ def get_minio(settings):
         # download minio binary
         try:
             response = requests.get(
-                "https://dl.min.io/server/minio/release/windows-amd64/minio.exe"
+                "https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/minio.windows-amd64.RELEASE.2025-09-07T16-13-09Z.exe"
             )
+            response.raise_for_status()
         except requests.exceptions.RequestException as e:
             logger.error("Could not download the Minio binary due to: ", e)
             exit(1)

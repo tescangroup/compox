@@ -4,10 +4,10 @@ All rights reserved
 """
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
 from compox.pydantic_models import ExecutionRecord, ResponseMessage
 from typing import List
 import json
+from compox.exceptions import CompoxTaskError
 
 router = APIRouter(
     prefix="/api", tags=["execution-manager"], include_in_schema=False
@@ -43,11 +43,12 @@ async def get_all_execution_records(request: Request) -> List[ExecutionRecord]:
             "execution-store", execution_records_ids
         )
         return [ExecutionRecord(**json.loads(obj)) for obj in execution_records]
-    except Exception as _:
-        return JSONResponse(
-            status_code=500,
-            content={"message": "Failed to get execution records"},
-        )
+    except Exception as e:
+        raise CompoxTaskError(
+            "Failed to get execution records",
+            code="execution_records_read_failed",
+            cause=e,
+        ) from e
 
 
 @router.delete(
@@ -77,12 +78,13 @@ async def delete_all_execution_records(request: Request) -> ResponseMessage:
         database_connection.delete_objects(
             "execution-store", execution_records_ids
         )
-        return ResponseMessage(message="Deleted all execution records")
-    except Exception as _:
-        return JSONResponse(
-            status_code=500,
-            content={"message": "Failed to delete execution records"},
-        )
+        return ResponseMessage(detail="Deleted all execution records")
+    except Exception as e:
+        raise CompoxTaskError(
+            "Failed to delete execution records",
+            code="execution_records_delete_failed",
+            cause=e,
+        ) from e
 
 
 @router.delete(
@@ -112,9 +114,11 @@ async def delete_execution_record(
     database_connection = request.app.state.database_connection
     try:
         database_connection.delete_objects("execution-store", [execution_id])
-        return ResponseMessage(message="Deleted execution record")
-    except Exception as _:
-        return JSONResponse(
-            status_code=500,
-            content={"message": "Failed to delete execution record"},
-        )
+        return ResponseMessage(detail="Deleted execution record")
+    except Exception as e:
+        raise CompoxTaskError(
+            "Failed to delete execution record",
+            code="execution_record_delete_failed",
+            details={"execution_id": execution_id},
+            cause=e,
+        ) from e

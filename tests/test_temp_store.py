@@ -16,6 +16,10 @@ class MySchema(DataSchema):
     array: np.ndarray
 
 
+class MyStringListSchema(DataSchema):
+    names: list[str]
+
+
 def test_temp_store_creation_and_deletion():
     """Test creating and deleting a temporary storage."""
     with TempStore() as temp_store:
@@ -73,3 +77,18 @@ def test_save_file_and_load_file():
     assert not os.path.exists(
         temp_store.root
     ), "Temporary storage path was not deleted."
+
+
+def test_save_and_load_string_list():
+    with TempStore() as temp_store:
+        my_files = [
+            {"names": ["mid_intensity", "high_intensity"]},
+            {"names": ["foreground"]},
+        ]
+
+        file_paths = temp_store.save(
+            "my_names", my_files, MyStringListSchema, parallel=False
+        )
+        loaded_files = temp_store.load(file_paths, parallel=False)
+
+        assert loaded_files == my_files

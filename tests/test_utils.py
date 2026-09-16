@@ -427,6 +427,47 @@ def is_port_in_use(port: int) -> bool:
         return s.connect_ex(("localhost", port)) == 0
 
 
+def benchmark_algorithm(
+    endpoint_url: str,
+    algorithm_id: str = None,
+    additional_parameters: dict = None,
+    headers=None,
+) -> requests.Response:
+    """
+    Trigger an algorithm benchmark.
+
+    Parameters
+    ----------
+    endpoint_url : str
+        The endpoint url.
+    algorithm_id : str
+        The algorithm id.
+    additional_parameters : dict, optional
+        Additional benchmark parameters.
+    headers : dict, optional
+        The headers. The default is None.
+
+    Returns
+    -------
+    requests.Response
+        The response.
+    """
+    if algorithm_id is None:
+        payload = {}
+    else:
+        payload = {"algorithm_id": algorithm_id}
+    if additional_parameters is not None:
+        payload["additional_parameters"] = additional_parameters
+    if headers is not None:
+        response = requests.post(endpoint_url, headers=headers, json=payload)
+    else:
+        response = requests.post(endpoint_url, json=payload)
+    return response
+
+
+get_benchmark_record = get_process_record
+
+
 def train_algorithm(
     endpoint_url: str,
     algorithm_id: str = None,

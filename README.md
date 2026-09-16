@@ -165,6 +165,7 @@ The server uses pydantic settings for configuration. The options can be either s
 | `gui`                              | `icon_path`                  | Path to the installed package resource | Path to the systray icon (supports dynamic prefixes).                    |
 | `inference`                        | `device`                     | `"cuda"`                             | Device used for model inference (`"cpu"`, `"cuda"`, `"mps"`).               |
 | `inference`                        | `cuda_visible_devices`       | `"0"`                                | Comma-separated list of visible CUDA GPUs.                                  |
+| `inference`                        | `algorithm_cache_maxsize`    | `1`                                  | Maximum number of cached algorithm runner variants kept per process.        |
 | `inference.backend_settings` (fastapi) | `executor`               | `"fastapi_background_tasks"`         | Task executor selection.                                                    |
 | `inference.backend_settings` (fastapi) | `worker_number`          | `1`                                  | Number of FastAPI background task workers.                                  |
 | `inference.backend_settings` (celery) | `executor`                | `"celery"`                           | Task executor selection.                                                    |

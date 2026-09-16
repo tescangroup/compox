@@ -3,13 +3,12 @@ Copyright 2026 TESCAN 3DIM, s.r.o.
 All rights reserved
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
 from typing import Optional
 
 from fastapi import APIRouter, Request, Query
-from fastapi.responses import JSONResponse
 
 from compox.algorithm_utils.AlgorithmDeployer import AlgorithmDeployer
 from compox.algorithm_utils.AlgorithmManager import AlgorithmManager
@@ -21,6 +20,12 @@ from compox.pydantic_models import (
 )
 from compox.server_utils import generate_uuid
 from compox.tasks.deploy_task_fastapi import deploy_task_fastapi
+from compox.exceptions import (
+    CompoxDeploymentError,
+    CompoxError,
+    CompoxNotFoundError,
+    CompoxValidationError,
+)
 
 router = APIRouter(prefix="/api", tags=["deploy-controller"])
 
@@ -92,16 +97,17 @@ def deploy_algorithm_local(
         None,
         description="Optional override for whether the algorithm is exportable.",
     ),
-) -> AlgorithmDeployResponse | JSONResponse:
+) -> AlgorithmDeployResponse:
     """
     Deploy an algorithm from a local folder or zip file.
     """
     database_connection = request.app.state.database_connection
 
     if not os.path.exists(path):
-        return JSONResponse(
-            status_code=400,
-            content={"detail": f"Path not found: {path}"},
+        raise CompoxValidationError(
+            f"Path not found: {path}",
+            code="deploy_path_not_found",
+            details={"path": path},
         )
 
     def build_deploy_response(algorithm_id: str) -> AlgorithmDeployResponse:
@@ -194,15 +200,19 @@ def deploy_algorithm_local(
                 ),
             )
             return build_deploy_response(algorithm_id)
-        return JSONResponse(
-            status_code=400,
-            content={"detail": "Path must be a directory or a .zip file."},
+        raise CompoxValidationError(
+            "Path must be a directory or a .zip file.",
+            code="invalid_deploy_path_type",
+            details={"path": path},
         )
+    except CompoxError:
+        raise
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Failed to deploy algorithm: {e}"},
-        )
+        raise CompoxDeploymentError(
+            "Failed to deploy algorithm",
+            code="algorithm_deploy_failed",
+            cause=e,
+        ) from e
 
 
 @router.post(
@@ -234,23 +244,22 @@ def deploy_algorithm_local_async(
         None,
         description="Optional override for whether the algorithm is exportable.",
     ),
-) -> DeployResponse | JSONResponse:
+) -> DeployResponse:
     """
     Deploy an algorithm from a local folder or zip file asynchronously.
     """
     settings = request.app.state.settings
     if settings.inference.backend_settings.executor != "fastapi_background_tasks":
-        return JSONResponse(
-            status_code=400,
-            content={
-                "detail": "Async deploy requires fastapi_background_tasks executor."
-            },
+        raise CompoxValidationError(
+            "Async deploy requires fastapi_background_tasks executor.",
+            code="invalid_async_deploy_executor",
         )
 
     if not os.path.exists(path):
-        return JSONResponse(
-            status_code=400,
-            content={"detail": f"Path not found: {path}"},
+        raise CompoxValidationError(
+            f"Path not found: {path}",
+            code="deploy_path_not_found",
+            details={"path": path},
         )
 
     database_connection = request.app.state.database_connection
@@ -259,7 +268,7 @@ def deploy_algorithm_local_async(
         deploy_id=deploy_id,
         status="PENDING",
         path=path,
-        time_started=str(datetime.now()),
+        time_started=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         time_completed=None,
         log=None,
     )
@@ -272,7 +281,9 @@ def deploy_algorithm_local_async(
     except Exception as e:
         fallback_record = record.model_dump()
         fallback_record["status"] = "FAILED"
-        fallback_record["time_completed"] = str(datetime.now())
+        fallback_record["time_completed"] = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
         fallback_record["log"] = f"Failed to save deploy record: {e}"
         request.app.state.emergency_record_store.write_record(
             "deploy-store",
@@ -294,11 +305,14 @@ def deploy_algorithm_local_async(
             removable_override=removable,
             exportable_override=exportable,
         )
+    except CompoxError:
+        raise
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Failed to start deploy task: {e}"},
-        )
+        raise CompoxDeploymentError(
+            "Failed to start deploy task",
+            code="deploy_task_start_failed",
+            cause=e,
+        ) from e
 
     return DeployResponse(deploy_id=deploy_id)
 
@@ -311,7 +325,7 @@ def deploy_algorithm_local_async(
 )
 async def get_deploy_record(
     deploy_id: str, request: Request
-) -> DeployRecord | JSONResponse:
+) -> DeployRecord:
     """
     Get deploy record by id.
     """
@@ -327,9 +341,10 @@ async def get_deploy_record(
         if not object_exists:
             if fallback_record is not None:
                 return DeployRecord(**fallback_record)
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "Deploy record not found"},
+            raise CompoxNotFoundError(
+                "Deploy record not found",
+                code="deploy_record_not_found",
+                details={"deploy_id": deploy_id},
             )
         primary_record = DeployRecord(
             **json.loads(
@@ -342,16 +357,19 @@ async def get_deploy_record(
             if primary_record.status.upper() not in {"FAILED", "COMPLETED"}:
                 return DeployRecord(**fallback_record)
         return primary_record
+    except CompoxError:
+        raise
     except Exception as e:
         fallback_record = emergency_record_store.read_record(
             "deploy-store", deploy_id
         )
         if fallback_record is not None:
             return DeployRecord(**fallback_record)
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Failed to get deploy record: {e}"},
-        )
+        raise CompoxDeploymentError(
+            "Failed to get deploy record",
+            code="deploy_record_read_failed",
+            cause=e,
+        ) from e
 
 
 @router.delete(
@@ -367,7 +385,7 @@ async def delete_removable_algorithm(
         None,
         description="Optional minor version to delete instead of the entire algorithm.",
     ),
-) -> ResponseMessage | JSONResponse:
+) -> ResponseMessage:
     """
     Delete an algorithm only if it is marked as removable.
     """
@@ -386,15 +404,17 @@ async def delete_removable_algorithm(
                 )
                 break
         if algorithm_record is None:
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "Algorithm not found"},
+            raise CompoxNotFoundError(
+                "Algorithm not found",
+                code="algorithm_not_found",
+                details={"algorithm_id": algorithm_id},
             )
 
         if not algorithm_record.get("removable", False):
-            return JSONResponse(
-                status_code=400,
-                content={"detail": "Algorithm is not removable"},
+            raise CompoxValidationError(
+                "Algorithm is not removable",
+                code="algorithm_not_removable",
+                details={"algorithm_id": algorithm_id},
             )
 
         algorithm_manager = AlgorithmManager(database_connection)
@@ -413,8 +433,11 @@ async def delete_removable_algorithm(
         return ResponseMessage(
             detail=f"Algorithm minor version {algorithm_minor_version} removed"
         )
+    except CompoxError:
+        raise
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Failed to remove algorithm: {e}"},
-        )
+        raise CompoxDeploymentError(
+            "Failed to remove algorithm",
+            code="algorithm_remove_failed",
+            cause=e,
+        ) from e

@@ -7,6 +7,9 @@ import json
 from loguru import logger
 
 from compox.database_connection import BaseConnection
+from compox.algorithm_utils.AlgorithmStorageMetrics import (
+    AlgorithmStorageMetrics,
+)
 from compox.training.AlgorithmCheckpoint import AlgorithmCheckpoint
 
 
@@ -262,6 +265,9 @@ class AlgorithmManager:
                         algorithm["latest_algorithm_minor_version"] = None
 
                 # update the algorithm record in the database
+                algorithm = AlgorithmStorageMetrics(
+                    self.database_connection
+                ).attach_metrics(algorithm)
                 self.database_connection.put_objects(
                     self.algorithms_collection,
                     [

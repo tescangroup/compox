@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from compox.database_connection.BaseConnection import BaseConnection
+from compox.exceptions import CompoxBundleError, CompoxConfigurationError
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -49,8 +50,10 @@ class CompoxAlgorithmBundleBuilder:
             Base64url-encoded 32-byte AES key.
         """
         if AESGCM is None:
-            raise ImportError(
-                "cryptography library is required for CompoxAlgorithmBundleBuilder"
+            raise CompoxConfigurationError(
+                "cryptography library is required for CompoxAlgorithmBundleBuilder",
+                code="bundle_crypto_dependency_missing",
+                cause=_IMPORT_ERROR,
             ) from _IMPORT_ERROR
         self._source_db = source_db
         self._key = self._decode_key(bundle_key)
@@ -186,12 +189,18 @@ class CompoxAlgorithmBundleBuilder:
         try:
             raw = base64.urlsafe_b64decode(key + "=" * (-len(key) % 4))
         except (ValueError, TypeError) as e:
-            raise ValueError(
-                "Invalid bundle key format. Expected base64url-encoded 32-byte key."
+            raise CompoxBundleError(
+                "Invalid bundle key format. Expected base64url-encoded 32-byte key.",
+                code="invalid_bundle_key",
+                http_status=400,
+                cause=e,
             ) from e
         if len(raw) != 32:
-            raise ValueError(
-                f"Invalid bundle key length: expected 32 bytes, got {len(raw)} bytes."
+            raise CompoxBundleError(
+                f"Invalid bundle key length: expected 32 bytes, got {len(raw)} bytes.",
+                code="invalid_bundle_key",
+                http_status=400,
+                details={"expected_bytes": 32, "actual_bytes": len(raw)},
             )
         return raw
 

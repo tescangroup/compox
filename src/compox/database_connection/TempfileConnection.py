@@ -158,6 +158,19 @@ class TempfileConnection(BaseConnection):
             for name in object_names
         ]
 
+    def get_object_sizes(
+        self, collection_name: str, object_names: list[str]
+    ) -> list[int]:
+        """
+        Get file sizes in bytes for objects in a subdirectory.
+        """
+        return [
+            os.path.getsize(
+                os.path.join(self.temp_folder.name, collection_name, name)
+            )
+            for name in object_names
+        ]
+
     def put_objects(
         self, collection_name: str, object_names: list[str], object: list[bytes]  | list[str]
     ) -> None:

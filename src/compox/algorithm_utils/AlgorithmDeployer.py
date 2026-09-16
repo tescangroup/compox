@@ -5,7 +5,7 @@ All rights reserved
 
 import uuid
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import shutil
 import glob
@@ -20,6 +20,7 @@ import python_minifier
 import toml
 import warnings
 from loguru import logger
+import time
 
 from compox.algorithm_utils.AlgorithmConfigSchema import (
     AlgorithmConfigSchema,
@@ -27,10 +28,20 @@ from compox.algorithm_utils.AlgorithmConfigSchema import (
 from compox.algorithm_utils.AlgorithmRecordRegistrar import (
     AlgorithmRecordRegistrar,
 )
+from compox.algorithm_utils.AlgorithmStorageMetrics import (
+    AlgorithmStorageMetrics,
+)
 from compox.algorithm_utils.import_relativizer import (
     relativize_intra_package_imports,
 )
 from compox.database_connection import BaseConnection
+from compox.exceptions import (
+    CompoxAssetError,
+    CompoxDeploymentError,
+    CompoxError,
+    CompoxImportError,
+    CompoxValidationError,
+)
 
 try:
     import tomllib
@@ -60,6 +71,8 @@ class AlgorithmDeployer:
 
     _IGNORED_METADATA_DIRS = {".git", "__pycache__"}
     _IGNORED_METADATA_FILES = {".gitignore", ".gitmodules", ".gitattributes"}
+    _MODULE_RENAME_RETRIES = 5
+    _MODULE_RENAME_RETRY_DELAY_SECONDS = 0.5
 
     def __init__(
         self,
@@ -97,6 +110,9 @@ class AlgorithmDeployer:
             self.training_parameters = algorithm_config_schema[
                 "training_parameters"
             ]
+            self.benchmark_outputs = algorithm_config_schema[
+                "benchmark_outputs"
+            ]
             self.removable = algorithm_config_schema.get("removable", False)
             self.exportable = algorithm_config_schema.get("exportable", True)
         else:
@@ -123,6 +139,9 @@ class AlgorithmDeployer:
             ]
             self.training_parameters = algorithm_config_schema[
                 "training_parameters"
+            ]
+            self.benchmark_outputs = algorithm_config_schema[
+                "benchmark_outputs"
             ]
             self.removable = algorithm_config_schema.get("removable", False)
             self.exportable = algorithm_config_schema.get("exportable", True)
@@ -206,19 +225,45 @@ class AlgorithmDeployer:
         str
             algorithm id
         """
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(tmp_dir)
-            algorithm_root = cls._find_algorithm_root(tmp_dir)
-            deployer = cls(algorithm_root)
-            return deployer.store_algorithm(
-                database_connection=database_connection,
-                algorithm_name_override=algorithm_name_override,
-                algorithm_major_version_override=algorithm_major_version_override,
-                algorithm_collection_name=algorithm_collection_name,
-                module_collection_name=module_collection_name,
-                asset_collection_name=asset_collection_name,
+        if not os.path.isfile(zip_path):
+            raise CompoxValidationError(
+                f"Algorithm deployment zip not found: {zip_path}",
+                code="deployment_zip_not_found",
+                details={"path": zip_path},
             )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    zf.extractall(tmp_dir)
+            except zipfile.BadZipFile as e:
+                raise CompoxValidationError(
+                    f"Invalid algorithm deployment zip: {zip_path}",
+                    code="invalid_deployment_zip",
+                    details={"path": zip_path},
+                    cause=e,
+                ) from e
+
+            try:
+                algorithm_root = cls._find_algorithm_root(tmp_dir)
+                deployer = cls(algorithm_root)
+                return deployer.store_algorithm(
+                    database_connection=database_connection,
+                    algorithm_name_override=algorithm_name_override,
+                    algorithm_major_version_override=algorithm_major_version_override,
+                    algorithm_collection_name=algorithm_collection_name,
+                    module_collection_name=module_collection_name,
+                    asset_collection_name=asset_collection_name,
+                )
+            except CompoxError:
+                raise
+            except Exception as e:
+                raise CompoxDeploymentError(
+                    "Failed to deploy algorithm from zip archive",
+                    code="deployment_zip_failed",
+                    details={"path": zip_path},
+                    cause=e,
+                ) from e
 
     def parse_pyproject_toml(self, path_to_algorithm_directory: str) -> dict:
         """
@@ -316,6 +361,7 @@ class AlgorithmDeployer:
             self.algorithm_name = algorithm_name_override
         if algorithm_major_version_override is not None:
             self.algorithm_major_version = algorithm_major_version_override
+        existing_algorithm_record = None
         # check if the algorithm already exists in the database
         if database_connection is not None:
             existing_algorithm_record = self._record_registrar.find_existing_algorithm_by_name_and_major(
@@ -350,9 +396,15 @@ class AlgorithmDeployer:
             self.logger.info(
                 f"Created algorithm module with id: {algorithm_module_id}"
             )
+        except CompoxError:
+            raise
         except Exception as e:
             self.logger.error(f"Failed to create algorithm module: {e}")
-            raise e
+            raise CompoxImportError(
+                "Failed to create algorithm module",
+                code="algorithm_module_create_failed",
+                cause=e,
+            ) from e
 
         if database_connection is not None:
             try:
@@ -386,9 +438,15 @@ class AlgorithmDeployer:
                     self.logger.info(
                         f"Stored algorithm module with id: {algorithm_module_id}"
                     )
+            except CompoxError:
+                raise
             except Exception as e:
                 self.logger.error(f"Failed to store algorithm module: {e}")
-                raise e
+                raise CompoxDeploymentError(
+                    "Failed to store algorithm module",
+                    code="algorithm_module_store_failed",
+                    cause=e,
+                ) from e
 
         # store the algorithm assets
         try:
@@ -400,12 +458,18 @@ class AlgorithmDeployer:
             self.logger.info(
                 f"Stored algorithm assets: {algorithm_assets_dict}"
             )
+        except CompoxError:
+            raise
         except Exception as e:
             self.logger.error(f"Failed to store algorithm assets: {e}")
-            raise e
+            raise CompoxAssetError(
+                "Failed to store algorithm assets",
+                code="algorithm_assets_store_failed",
+                cause=e,
+            ) from e
 
         # get the timestamp
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
         # compose the algorithm json
 
@@ -426,6 +490,7 @@ class AlgorithmDeployer:
                         "default_device": self.default_device,
                         "additional_parameters": self.additional_parameters,
                         "training_parameters": self.training_parameters,
+                        "benchmark_outputs": self.benchmark_outputs,
                         "removable": self.removable,
                         "exportable": self.exportable,
                     },
@@ -446,7 +511,10 @@ class AlgorithmDeployer:
         # store the algorithm json in the algorithm-store collection
         # check if the collection exists and create it if it does not
 
-        if database_connection is not None and record_modified:
+        if database_connection is not None:
+            algorithm_json = AlgorithmStorageMetrics(
+                database_connection
+            ).attach_metrics(algorithm_json)
             self._record_registrar.upsert_algorithm_record(
                 database_connection=database_connection,
                 algorithm_record=algorithm_json,
@@ -530,8 +598,10 @@ class AlgorithmDeployer:
 
         Raises
         ------
-        ValueError
-            if Runner.py not found or import failed
+        CompoxValidationError
+            if Runner.py / Runner.pyc is missing.
+        CompoxImportError
+            if importability check fails.
         """
 
         # Source algorithms are transformed from .py files. Exported/runtime
@@ -551,8 +621,10 @@ class AlgorithmDeployer:
         has_runner_pyc = "Runner.pyc" in pyc_files_with_relative_path
 
         if not has_runner_py and not has_runner_pyc:
-            raise ValueError(
-                "Runner.py / Runner.pyc not found in the root of the algorithm directory."
+            raise CompoxValidationError(
+                "Runner.py / Runner.pyc not found in the root of the algorithm directory.",
+                code="algorithm_runner_not_found",
+                details={"algorithm_directory": path_to_algorithm_directory},
             )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -654,7 +726,9 @@ class AlgorithmDeployer:
             )
 
             final_module_path = os.path.join(root_module_dir, module_id)
-            os.rename(module_path, final_module_path)
+            self._rename_module_path_with_retries(
+                module_path, final_module_path
+            )
 
             # create a temporary zip file of the temporary directory
             shutil.make_archive(root_module_dir, "zip", root_module_dir)
@@ -664,14 +738,50 @@ class AlgorithmDeployer:
                     root_module_dir + ".zip", module_id
                 )
                 if not importable:
-                    raise ValueError(
-                        "The current environment cannot import the the algorithm module. Check the above logs for more details about the ImportError cause. This check can be disabled by setting check_importable to False in the affected algorithm's pyproject.toml file."
+                    raise CompoxImportError(
+                        "The current environment cannot import the algorithm module. Check the above logs for more details about the ImportError cause. This check can be disabled by setting check_importable to False in the affected algorithm's pyproject.toml file.",
+                        code="algorithm_module_import_check_failed",
+                        details={"module_id": module_id},
                     )
 
             with open(root_module_dir + ".zip", "rb") as f:
                 module_bytes = f.read()
 
         return module_id, module_bytes
+
+    def _rename_module_path_with_retries(
+        self,
+        source_path: str,
+        target_path: str,
+        retries: int | None = None,
+        delay_seconds: float | None = None,
+    ) -> None:
+        """
+        Rename the staged module directory, tolerating short transient file locks.
+
+        On Windows, antivirus/indexing tools can briefly lock newly written
+        Python files. In that case ``os.rename`` can fail even though retrying a
+        moment later succeeds.
+        """
+        retry_count = retries or self._MODULE_RENAME_RETRIES
+        retry_delay = (
+            self._MODULE_RENAME_RETRY_DELAY_SECONDS
+            if delay_seconds is None
+            else delay_seconds
+        )
+
+        for attempt in range(1, retry_count + 1):
+            try:
+                os.rename(source_path, target_path)
+                return
+            except PermissionError as e:
+                if attempt >= retry_count:
+                    raise
+                self.logger.warning(
+                    "Cannot rename module path, retrying "
+                    f"({attempt}/{retry_count}): {e}"
+                )
+                time.sleep(retry_delay)
 
     @staticmethod
     def _compile_and_strip_py_files(

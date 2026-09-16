@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from loguru import logger
 from concurrent.futures import ThreadPoolExecutor
+from pydantic import ValidationError
 from compox.server_utils import (
     find_algorithm_by_id,
     generate_uuid,
@@ -20,14 +21,39 @@ from compox.server_utils import (
 )
 from compox.algorithm_utils.zip_importer import ZipImporter
 from compox.algorithm_utils.io_schemas import DataSchema
+from compox.internal.hdf5_io import HDF5IO
 from compox.session.TaskSession import TaskSession
 from compox.database_connection.S3Connection import S3Connection
 from compox.training.AlgorithmCheckpoint import AlgorithmCheckpoint
 from compox.tasks.StopRequest import StopRequest
 from compox.internal.EmergencyRecordStore import EmergencyRecordStore
+from compox.exceptions import (
+    CompoxAlgorithmError,
+    CompoxAssetError,
+    CompoxError,
+    CompoxExecutionError,
+    CompoxImportError,
+    CompoxNotFoundError,
+    CompoxStateError,
+    CompoxTaskError,
+    error_failure_payload,
+)
 
 
-class TaskStoppedException(Exception): ...
+class TaskStoppedException(CompoxTaskError):
+    """
+    Raised when a task has been stopped by request.
+
+    The class name is kept for backward compatibility with existing callers.
+    """
+
+    def __init__(self, message: str = "Task has been stopped.") -> None:
+        super().__init__(
+            message,
+            code="task_stopped",
+            http_status=409,
+            retryable=False,
+        )
 
 
 class TaskHandler:
@@ -52,6 +78,7 @@ class TaskHandler:
     """
 
     _RECORD_STORAGE_NAME = "execution-store"
+    _ALGORITHM_CACHE_MAXSIZE = 1
 
     def __init__(
         self,
@@ -109,18 +136,12 @@ class TaskHandler:
             If getting the task record fails.
         """
         self._check_for_stop_request()
-        try:
-            task_record = json.loads(
-                self.database_connection.get_objects(
-                    self._RECORD_STORAGE_NAME,
-                    [self._task_id],
-                )[0]
-            )
-            return task_record
-        except TaskStoppedException:
-            raise
-        except Exception as e:
-            raise e
+        return json.loads(
+            self.database_connection.get_objects(
+                self._RECORD_STORAGE_NAME,
+                [self._task_id],
+            )[0]
+        )
 
     def _check_for_stop_request(self) -> None:
         """
@@ -148,8 +169,13 @@ class TaskHandler:
         except TaskStoppedException:
             raise
         except Exception as e:
-            self.mark_as_failed(e)
-            raise e
+            error = CompoxTaskError(
+                "Failed to check task stop request.",
+                code="stop_request_check_failed",
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
     def _save_task_record(self, task_record: dict) -> None:
         """
@@ -169,14 +195,40 @@ class TaskHandler:
         Exception
             If saving the task record fails.
         """
+        self.database_connection.put_objects(
+            self._RECORD_STORAGE_NAME,
+            [self._task_id],
+            [json.dumps(task_record).encode()],
+        )
+
+    def _update_task_record_field(self, field: str, value: Any) -> None:
+        """
+        Persist one field change to the task record.
+
+        This keeps task-record update failures on one typed path instead of
+        duplicating catch/fail/re-raise blocks in each property setter.
+        """
+        if not self.database_update:
+            return
+
         try:
-            self.database_connection.put_objects(
-                self._RECORD_STORAGE_NAME,
-                [self._task_id],
-                [json.dumps(task_record).encode()],
-            )
+            task_record = self._get_task_record()
+            task_record[field] = value
+            self._save_task_record(task_record)
+        except TaskStoppedException:
+            raise
+        except CompoxError as e:
+            self.mark_as_failed(e)
+            raise
         except Exception as e:
-            raise e
+            error = CompoxTaskError(
+                "Failed to update task record.",
+                code="task_record_update_failed",
+                details={"field": field},
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
     @property
     def task_id(self):
@@ -224,14 +276,7 @@ class TaskHandler:
             )
 
         self._progress = progress
-        if self.database_update:
-            try:
-                task_record = self._get_task_record()
-                task_record["progress"] = progress
-                self._save_task_record(task_record)
-            except Exception as e:
-                self.mark_as_failed(e)
-                raise e
+        self._update_task_record_field("progress", progress)
 
     @property
     def status(self):
@@ -274,14 +319,7 @@ class TaskHandler:
             raise ValueError(f"Invalid status. Got: {status}")
 
         self._status = status
-        if self.database_update:
-            try:
-                task_record = self._get_task_record()
-                task_record["status"] = status
-                self._save_task_record(task_record)
-            except Exception as e:
-                self.mark_as_failed(e)
-                raise e
+        self._update_task_record_field("status", status)
 
     @property
     def output_dataset_ids(self):
@@ -313,14 +351,7 @@ class TaskHandler:
         Exception
         """
         self._output_dataset_ids = output_dataset_ids
-        if self.database_update:
-            try:
-                task_record = self._get_task_record()
-                task_record["output_dataset_ids"] = output_dataset_ids
-                self._save_task_record(task_record)
-            except Exception as e:
-                self.mark_as_failed(e)
-                raise e
+        self._update_task_record_field("output_dataset_ids", output_dataset_ids)
 
     @property
     def time_completed(self):
@@ -352,14 +383,7 @@ class TaskHandler:
         Exception
         """
         self._time_completed = time_completed
-        if self.database_update:
-            try:
-                task_record = self._get_task_record()
-                task_record["time_completed"] = time_completed
-                self._save_task_record(task_record)
-            except Exception as e:
-                self.mark_as_failed(e)
-                raise e
+        self._update_task_record_field("time_completed", time_completed)
 
     @property
     def session_token(self):
@@ -391,14 +415,7 @@ class TaskHandler:
         Exception
         """
         self._session_token = session_token
-        if self.database_update:
-            try:
-                task_record = self._get_task_record()
-                task_record["session_token"] = session_token
-                self._save_task_record(task_record)
-            except Exception as e:
-                self.mark_as_failed(e)
-                raise e
+        self._update_task_record_field("session_token", session_token)
 
     def set_as_current_handler(self) -> None:
         """
@@ -481,7 +498,8 @@ class TaskHandler:
             self.log = str(self.stream.getvalue())
 
             failed_record = self._build_failed_record(
-                time_completed=str(datetime.now())
+                time_completed=str(datetime.now()),
+                error=e,
             )
             try:
                 self.database_connection.put_objects(
@@ -530,8 +548,15 @@ class TaskHandler:
             self._log_file_stats()
             self.update_log()
 
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
+        except Exception as e:
+            error = CompoxTaskError(
+                "Failed while marking task as stopped.",
+                code="task_stop_update_failed",
+                cause=e,
+            )
+            self.mark_as_failed(error)
         finally:
             try:
                 logger.remove(self.logger_sink_id)
@@ -559,16 +584,13 @@ class TaskHandler:
         Exception
         """
         self.log = str(self.stream.getvalue())
-        if self.database_update:
-            try:
-                task_record = self._get_task_record()
-                task_record["log"] = self.log
-                self._save_task_record(task_record)
-            except Exception as e:
-                self.mark_as_failed(e)
-                raise e
+        self._update_task_record_field("log", self.log)
 
-    def _build_failed_record(self, time_completed: str) -> dict:
+    def _build_failed_record(
+        self,
+        time_completed: str,
+        error: Exception | str | None = None,
+    ) -> dict:
         """
         Build a terminal failed task record from the current stored record.
         """
@@ -587,6 +609,8 @@ class TaskHandler:
         task_record["time_completed"] = time_completed
         task_record["output_dataset_ids"] = []
         task_record["log"] = self.log
+        if error is not None:
+            task_record["error"] = error_failure_payload(error)
         return task_record
 
     def _record_id_field_name(self) -> str:
@@ -651,7 +675,11 @@ class TaskHandler:
                 self.database_connection.list_objects("algorithm-store"),
             )
             if found_algorithm_key is None:
-                raise ValueError(f"Algorithm with id {algorithm_id} not found.")
+                raise CompoxNotFoundError(
+                    f"Algorithm with id {algorithm_id} not found.",
+                    code="algorithm_not_found",
+                    details={"algorithm_id": algorithm_id},
+                )
 
             # Always resolve latest algorithm metadata before entering cache.
             algorithm_json = json.loads(
@@ -694,11 +722,22 @@ class TaskHandler:
                 task_id=self.task_id,
             )
             return runner
-        except Exception as e:
+        except TaskStoppedException:
+            raise
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise ValueError(f"Failed to fetch algorithm: {e}")
+            raise
+        except Exception as e:
+            error = CompoxAlgorithmError(
+                "Failed to fetch algorithm",
+                code="algorithm_fetch_failed",
+                details={"algorithm_id": algorithm_id},
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
-    @algorithm_cache(maxsize=1)
+    @algorithm_cache(maxsize=1, maxsize_attr="_ALGORITHM_CACHE_MAXSIZE")
     def __cached_fetch_algorithm(
         self,
         algorithm_json: dict,
@@ -761,9 +800,17 @@ class TaskHandler:
                     checkpoint_id=checkpoint_id,
                     database_connection=self.database_connection,
                 )
+            except CompoxError:
+                raise
             except Exception as e:
-                self.mark_as_failed(e)
-                raise ValueError(f"Failed to load checkpoint: {e}")
+                error = CompoxAlgorithmError(
+                    "Failed to load checkpoint",
+                    code="checkpoint_load_failed",
+                    details={"checkpoint_id": checkpoint_id},
+                    cause=e,
+                )
+                self.mark_as_failed(error)
+                raise error from e
             # override the algorithm assets with the ones from the checkpoint
             for (
                 key,
@@ -774,10 +821,20 @@ class TaskHandler:
                         algorithm_minor_version
                     ]["assets"][key] = value
                 except KeyError as ke:
-                    self.logger.error(
-                        f"Asset {key} from checkpoint not found in algorithm assets. Make sure the checkpoint is compatible with the algorithm."
+                    error = CompoxAlgorithmError(
+                        f"Asset {key} from checkpoint not found in algorithm assets.",
+                        code="checkpoint_asset_incompatible",
+                        details={
+                            "checkpoint_id": checkpoint_id,
+                            "asset_path": key,
+                        },
+                        cause=ke,
                     )
-                    self.mark_as_failed(ke)
+                    self.logger.error(
+                        f"{error.message} Make sure the checkpoint is compatible with the algorithm."
+                    )
+                    self.mark_as_failed(error)
+                    raise error from ke
         module_id = algorithm_json["algorithm_minor_version"][
             algorithm_minor_version
         ]["module_id"]
@@ -798,9 +855,18 @@ class TaskHandler:
                 runner = m.Runner.__new__(m.Runner)
                 runner.initialize(device=device)
                 runner._load_assets()
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise ValueError(f"Failed to fetch algorithm: {e}")
+            raise
+        except Exception as e:
+            error = CompoxImportError(
+                "Failed to import algorithm module",
+                code="algorithm_module_import_failed",
+                details={"module_id": module_id},
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
         return runner, algorithm_assets, device
 
     def _set_resolved_execution_device(
@@ -991,9 +1057,20 @@ class TaskHandler:
             If fetch asset failed.
         """
         if self.algorithm_assets is None:
-            raise ValueError("Algorithm assets are not initialized.")
+            raise CompoxStateError(
+                "Algorithm assets are not initialized.",
+                code="algorithm_assets_not_initialized",
+            )
 
-        asset_id = self.algorithm_assets[asset_path]
+        try:
+            asset_id = self.algorithm_assets[asset_path]
+        except KeyError as e:
+            raise CompoxAssetError(
+                f"Asset path '{asset_path}' is not registered for the algorithm.",
+                code="asset_path_not_found",
+                details={"asset_path": asset_path},
+                cause=e,
+            ) from e
         self.logger.info(f"Fetching asset {asset_id} from the database.")
         try:
             start = time.time()
@@ -1009,9 +1086,18 @@ class TaskHandler:
                 f"Asset {asset_id} fetched in {round(end - start, 4)} seconds."
             )
             return asset
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise ValueError(f"Failed to fetch asset: {e}")
+            raise
+        except Exception as e:
+            error = CompoxAssetError(
+                "Failed to fetch asset",
+                code="asset_fetch_failed",
+                details={"asset_path": asset_path, "asset_id": asset_id},
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
     def fetch_data(
         self,
@@ -1065,12 +1151,12 @@ class TaskHandler:
             if len(keys) == 0:
                 with h5py.File(file_like_obj, "r") as f:
                     for key in f.keys():
-                        data_dict[key] = f[key][()]
+                        data_dict[key] = HDF5IO.read_dataset(f[key])
             else:
                 with h5py.File(file_like_obj, "r") as f:
                     for key in keys:
                         try:
-                            data_dict[key] = f[key][()]
+                            data_dict[key] = HDF5IO.read_dataset(f[key])
                         except KeyError:
                             data_dict[key] = None
             # validate and dump
@@ -1091,9 +1177,24 @@ class TaskHandler:
             self.file_fetching_stats["time"] += end - start
             return datasets
 
-        except Exception as e:
+        except ValidationError as e:
             self.mark_as_failed(e)
-            raise e
+            raise
+        except KeyError as e:
+            self.mark_as_failed(e)
+            raise
+        except CompoxError as e:
+            self.mark_as_failed(e)
+            raise
+        except Exception as e:
+            error = CompoxExecutionError(
+                "Failed to fetch data",
+                code="data_fetch_failed",
+                details={"file_ids": file_ids},
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
     def post_data(
         self,
@@ -1137,10 +1238,7 @@ class TaskHandler:
             with h5py.File(bio, "w") as f:
                 for key in r.keys():
                     if r[key] is not None:
-                        f.create_dataset(
-                            key,
-                            data=r[key],
-                        )
+                        HDF5IO.write_dataset(f, key, r[key])
             # upload response to minio
             output_dataset_id = generate_uuid()
             self.database_connection.put_objects(
@@ -1161,9 +1259,20 @@ class TaskHandler:
             self.file_posting_stats["count"] += len(result)
             self.file_posting_stats["time"] += end - start
 
-        except Exception as e:
+        except ValidationError as e:
             self.mark_as_failed(e)
-            raise e
+            raise
+        except CompoxError as e:
+            self.mark_as_failed(e)
+            raise
+        except Exception as e:
+            error = CompoxExecutionError(
+                "Failed to post data",
+                code="data_post_failed",
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
         return output_dataset_ids
 
     def save_item_to_session(self, obj: Any, key: str) -> None:
@@ -1189,16 +1298,28 @@ class TaskHandler:
         """
 
         if self.task_session is None:
-            raise ValueError("Task session is not initialized.")
+            raise CompoxStateError(
+                "Task session is not initialized.",
+                code="task_session_not_initialized",
+            )
 
         try:
             self.task_session.add_item(obj, key)
             self.logger.info(
                 f"Saved object with key {key} to the task session."
             )
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise e
+            raise
+        except Exception as e:
+            error = CompoxTaskError(
+                "Failed to save item to task session",
+                code="task_session_save_failed",
+                details={"key": key},
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
     def load_item_from_session(self, key: str) -> Any:
         """
@@ -1223,7 +1344,10 @@ class TaskHandler:
         """
 
         if self.task_session is None:
-            raise ValueError("Task session is not initialized.")
+            raise CompoxStateError(
+                "Task session is not initialized.",
+                code="task_session_not_initialized",
+            )
 
         try:
             obj = self.task_session[key]
@@ -1231,6 +1355,12 @@ class TaskHandler:
                 f"Loaded object with key {key} from the task session."
             )
             return obj
+        except KeyError as e:
+            self.mark_as_failed(e)
+            raise
+        except CompoxError as e:
+            self.mark_as_failed(e)
+            raise
         except Exception as e:
             if self.task_session is None:
                 self.logger.error(
@@ -1239,8 +1369,14 @@ class TaskHandler:
                     "Please make sure you are providing the session token in the",
                     "execution request.",
                 )
-            self.mark_as_failed(e)
-            raise e
+            error = CompoxTaskError(
+                "Failed to load item from task session",
+                code="task_session_load_failed",
+                details={"key": key},
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
     def remove_item_from_session(self, key: str) -> None:
         """
@@ -1263,13 +1399,28 @@ class TaskHandler:
         """
 
         if self.task_session is None:
-            raise ValueError("Task session is not initialized.")
+            raise CompoxStateError(
+                "Task session is not initialized.",
+                code="task_session_not_initialized",
+            )
 
         try:
             self.task_session.remove_item(key)
             self.logger.info(
                 f"Removed object with key {key} from the task session."
             )
-        except Exception as e:
+        except KeyError as e:
             self.mark_as_failed(e)
-            raise e
+            raise
+        except CompoxError as e:
+            self.mark_as_failed(e)
+            raise
+        except Exception as e:
+            error = CompoxTaskError(
+                "Failed to remove item from task session",
+                code="task_session_remove_failed",
+                details={"key": key},
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e

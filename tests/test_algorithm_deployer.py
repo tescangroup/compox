@@ -537,6 +537,73 @@ def test_create_algorithm_module_from_compiled_artifact(tmp_path):
     ), "Expected non-empty module bytes for compiled artifact."
 
 
+def test_rename_module_path_retries_transient_permission_error(
+    valid_alg_dir, tmp_path, monkeypatch
+):
+    """
+    Verify transient file locks during module rename are retried.
+    """
+    source = tmp_path / "module_staging"
+    target = tmp_path / "module_final"
+    source.mkdir()
+    (source / "Runner.py").write_text("class Runner: pass\n")
+
+    original_rename = os.rename
+    attempts = {"count": 0}
+
+    def flaky_rename(src, dst):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise PermissionError("simulated transient file lock")
+        original_rename(src, dst)
+
+    monkeypatch.setattr(
+        "compox.algorithm_utils.AlgorithmDeployer.os.rename", flaky_rename
+    )
+    monkeypatch.setattr(
+        "compox.algorithm_utils.AlgorithmDeployer.time.sleep",
+        lambda _seconds: None,
+    )
+
+    deployer = AlgorithmDeployer(valid_alg_dir)
+    deployer._rename_module_path_with_retries(
+        str(source),
+        str(target),
+        retries=5,
+        delay_seconds=0,
+    )
+
+    assert attempts["count"] == 3
+    assert target.exists()
+    assert not source.exists()
+
+
+def test_rename_module_path_does_not_retry_non_transient_error(
+    valid_alg_dir, tmp_path, monkeypatch
+):
+    """
+    Verify unrelated rename failures are not hidden by the retry helper.
+    """
+    source = tmp_path / "module_staging"
+    target = tmp_path / "module_final"
+    source.mkdir()
+    attempts = {"count": 0}
+
+    def failing_rename(_src, _dst):
+        attempts["count"] += 1
+        raise FileNotFoundError("simulated unrelated rename failure")
+
+    monkeypatch.setattr(
+        "compox.algorithm_utils.AlgorithmDeployer.os.rename", failing_rename
+    )
+
+    deployer = AlgorithmDeployer(valid_alg_dir)
+    with pytest.raises(FileNotFoundError):
+        deployer._rename_module_path_with_retries(str(source), str(target))
+
+    assert attempts["count"] == 1
+
+
 def test_find_other_than_py_files_ignores_git_metadata(tmp_path):
     """
     Verify that find_other_than_py_files ignores Git metadata files and directories.

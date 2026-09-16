@@ -6,7 +6,8 @@ This tutorial shows how to prepare and deploy an algorithm to **Compox** and run
 > *Ultramicroscopy* **246**, 113674 (2023).  
 > DOI: [10.1016/j.ultramic.2022.113674](https://doi.org/10.1016/j.ultramic.2022.113674)
 
-![Visualization](tutorial_images/visualization.png)
+![Visualization](tutorial_images/visualization.jpg)
+*The specimen was provided by EMBI, University of Helsinki*
 
 ## 1. Compox Installation
 
@@ -395,7 +396,7 @@ if os.getenv("COMPOX_DEBUG_SHOW") == "1":
 
 This way, the visualization will appear when you run `Runner.py` directly for debugging, but it will not show any extra windows when the algorithm is executed from **Tescan 3D Viewer**. After running, you should see a side-by-side comparison of the original and filtered slices:
 
-![Visualization](tutorial_images/visualization.png)
+![Visualization](tutorial_images/visualization.jpg)
 
 ## 6. Updating the progress bar in **Viewer** during inference ##
 This step is optional. By default, the Viewer already displays a progress bar that is updated during most stages of the algorithm execution. However, during the `inference` step the progress bar is not updated and only continues once inference is fully completed.

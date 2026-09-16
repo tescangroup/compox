@@ -134,6 +134,64 @@ Notes:
 
 ---
 
+### Benchmark algorithm (optional)
+
+Endpoint:
+- `POST /api/v0/benchmark-algorithm`
+
+Payload model: `IncomingBenchmarkRequest`
+- `algorithm_id`: string
+- `additional_parameters`: dict (free-form benchmark arguments)
+
+Example:
+```json
+{
+  "algorithm_id": "<algorithm_id>",
+  "additional_parameters": {
+    "sigma": 5,
+    "winsize": 9
+  }
+}
+```
+
+Response:
+```json
+{ "benchmark_id": "..." }
+```
+
+Status endpoint:
+- `GET /api/v0/benchmarks/{benchmark_id}`
+
+Response model: `BenchmarkRecord`
+- Includes `status`, `time_started`, `time_completed`, `log`, and `data`.
+
+Example status response (shape):
+```json
+{
+  "benchmark_id": "...",
+  "algorithm_id": "...",
+  "additional_parameters": {
+    "sigma": 5,
+    "winsize": 9
+  },
+  "status": "COMPLETED",
+  "time_started": "...",
+  "time_completed": "...",
+  "log": "...",
+  "data": {
+    "latency_s": 0.021,
+    "throughput": 47.6
+  }
+}
+```
+
+Notes:
+- Valid statuses are `PENDING`, `STARTED`, `RUNNING`, `COMPLETED`, `FAILED`, `STOPPED`.
+- Benchmark records are initialized with `status="PENDING"` and `time_started`.
+- On storage fallback failure paths, records are finalized as `FAILED` with `time_completed` and log details.
+
+---
+
 ### Stop execution (optional)
 
 Endpoint:
@@ -174,7 +232,8 @@ Notes:
 1. Upload HDF5 files -> get `file_id`s
 2. Execute algorithm with `algorithm_id` + `input_dataset_ids` -> get `execution_id`
 3. Optionally reuse a `session_token` across executions (FastAPI background tasks only)
-4. Poll execution record -> read status + `output_dataset_ids` (and `session_token` if used)
-5. Optionally stop execution
-6. Download each output dataset by ID
-7. Optionally delete files to free up storage early
+4. Optionally benchmark algorithm (`/benchmark-algorithm`) and poll benchmark record (`/benchmarks/{id}`)
+5. Poll execution record -> read status + `output_dataset_ids` (and `session_token` if used)
+6. Optionally stop execution
+7. Download each output dataset by ID
+8. Optionally delete files to free up storage early

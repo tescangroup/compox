@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from compox.training.TrainingSample import TrainingSample
 from compox.database_connection.InMemoryConnection import InMemoryConnection
 from compox.algorithm_utils.io_schemas import DataSchema
+from compox.exceptions import CompoxNotFoundError
 
 
 class MySchema(DataSchema):
@@ -237,11 +238,12 @@ def test_save_load_delete_sample_manifest(db_connection):
     assert (
         loaded_sample.delete_sample_manifest()
     ), "Failed to delete sample manifest."
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(CompoxNotFoundError) as exc_info:
         TrainingSample(
             db_connection,
             sample_id="3f8b2b65-1c3d-4a55-8a1d-7c2d4c0b9a90",
         ).load_sample_manifest()
+    assert exc_info.value.code == "sample_not_found"
 
 
 @pytest.mark.parametrize(

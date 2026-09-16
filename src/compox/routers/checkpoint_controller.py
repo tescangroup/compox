@@ -4,11 +4,15 @@ All rights reserved
 """
 
 from fastapi import APIRouter, Request, Query
-from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from typing import List, Optional
 
 from compox.training.AlgorithmCheckpoint import AlgorithmCheckpoint
+from compox.exceptions import (
+    CompoxCheckpointError,
+    CompoxNotFoundError,
+    CompoxValidationError,
+)
 from compox.pydantic_models import (
     ResponseMessage,
     AlgorithmCheckpointRecord,
@@ -57,9 +61,9 @@ async def list_checkpoints(
         )
 
         if len(all_samples) == 0:
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "No samples found in the sample store"},
+            raise CompoxNotFoundError(
+                "No checkpoints found in the checkpoint store",
+                code="checkpoints_not_found",
             )
 
         checkpoints = []
@@ -81,13 +85,16 @@ async def list_checkpoints(
                 except ValidationError as _:
                     continue
         return checkpoints
+    except CompoxNotFoundError:
+        raise
+    except CompoxCheckpointError:
+        raise
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": f"Failed to list checkpoints due to an internal server error: {e}"
-            },
-        )
+        raise CompoxCheckpointError(
+            "Failed to list checkpoints due to an internal server error.",
+            code="checkpoint_list_failed",
+            cause=e,
+        ) from e
 
 
 @router.get(
@@ -115,24 +122,31 @@ async def get_checkpoint(checkpoint_id: str, request: Request):
     """
     database_connection = request.app.state.database_connection
     try:
-        try:
-            algorithm_checkpoint = AlgorithmCheckpoint(
-                database_connection, checkpoint_id=checkpoint_id
-            )
-        except Exception as _:
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "Checkpoint not found"},
-            )
+        algorithm_checkpoint = AlgorithmCheckpoint(
+            database_connection, checkpoint_id=checkpoint_id
+        )
 
         return AlgorithmCheckpointRecord(
             **algorithm_checkpoint.checkpoint_manifest.model_dump()
         )
-    except Exception as _:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "Failed to get sample"},
-        )
+    except CompoxNotFoundError:
+        raise
+    except ValidationError as e:
+        raise CompoxValidationError(
+            "Invalid checkpoint record.",
+            code="invalid_checkpoint_record",
+            details={"checkpoint_id": checkpoint_id},
+            cause=e,
+        ) from e
+    except CompoxCheckpointError:
+        raise
+    except Exception as e:
+        raise CompoxCheckpointError(
+            "Failed to get checkpoint.",
+            code="checkpoint_get_failed",
+            details={"checkpoint_id": checkpoint_id},
+            cause=e,
+        ) from e
 
 
 @router.delete(
@@ -163,28 +177,21 @@ async def delete_checkpoint(
     database_connection = request.app.state.database_connection
 
     try:
-        objects_exist = database_connection.check_objects_exist(
-            "algorithm-checkpoint-store", [checkpoint_id]
-        )
-
-        if not objects_exist[0]:
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "Checkpoint not found"},
-            )
-
         algorithm_checkpoint = AlgorithmCheckpoint(
             database_connection, checkpoint_id=checkpoint_id
         )
 
         algorithm_checkpoint.delete_checkpoint()
 
-        return JSONResponse(
-            status_code=200,
-            content={"detail": "Checkpoint deleted successfully"},
-        )
-    except Exception as _:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "Failed to delete checkpoint"},
-        )
+        return ResponseMessage(detail="Checkpoint deleted successfully")
+    except CompoxNotFoundError:
+        raise
+    except CompoxCheckpointError:
+        raise
+    except Exception as e:
+        raise CompoxCheckpointError(
+            "Failed to delete checkpoint.",
+            code="checkpoint_delete_failed",
+            details={"checkpoint_id": checkpoint_id},
+            cause=e,
+        ) from e

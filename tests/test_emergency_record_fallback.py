@@ -141,6 +141,8 @@ def test_task_handler_writes_failed_state_to_emergency_store(tmp_path: Path):
     assert fallback_record["progress"] == 1.0
     assert fallback_record["output_dataset_ids"] == []
     assert "_emergency_storage_error" in fallback_record
+    assert "_emergency_storage_error_code" in fallback_record
+    assert fallback_record["_emergency_storage_retryable"] is False
 
 
 def test_emergency_record_store_uses_reserve_on_enospc(tmp_path: Path):
@@ -454,6 +456,8 @@ def test_execute_algorithm_writes_initial_failed_fallback(tmp_path: Path):
     assert fallback_record["status"] == "FAILED"
     assert "Failed to save execution record" in fallback_record["log"]
     assert "_emergency_storage_error" in fallback_record
+    assert "_emergency_storage_error_code" in fallback_record
+    assert fallback_record["_emergency_storage_retryable"] is False
 
 
 def test_execute_algorithm_passes_shared_emergency_store_to_background_task(
@@ -661,6 +665,8 @@ def test_deploy_task_writes_fallback_to_shared_emergency_store(tmp_path: Path):
     assert fallback_record["status"] == "FAILED"
     assert fallback_record["path"] == missing_path
     assert "_emergency_storage_error" in fallback_record
+    assert "_emergency_storage_error_code" in fallback_record
+    assert fallback_record["_emergency_storage_retryable"] is False
 
 
 def test_async_deploy_passes_shared_emergency_store_to_background_task(

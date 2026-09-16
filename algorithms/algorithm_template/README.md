@@ -39,6 +39,9 @@ additional_parameters = [
     { name = "scale", displayed_name = "Scale", description = "Multiplier applied to the input data.", config = { type = "float", default = 1.0, decimal_precision = 2, adjustable = true } },
     { name = "bias", displayed_name = "Bias", description = "Bias added after scaling.", config = { type = "float", default = 0.0, decimal_precision = 2, adjustable = true } },
 ]
+benchmark_outputs = [
+    {name = "inference_time", description = "Time taken for inference in seconds.", config = {type = "float", decimal_precision = 4}},
+]
 check_importable = false
 obfuscate = true
 ```
@@ -72,6 +75,25 @@ arrays using parameters from `pyproject.toml`.
 The `dependencies/` package is where you can place local helper functions or
 small internal modules. In this template, `dependencies/utils.py` contains the
 simple transform used during inference.
+
+## Benchmark algorithm
+
+You can verify how computationally demanding algorithm inference is on dummy data of a specific size. You can implement the `benchmark` method and monitor inference time, VRAM usage, or other metrics.
+
+```python
+def benchmark(self, args: dict | None = None) -> dict:
+    """
+    Benchmark the algorithm performance.
+    """
+    dummy_data = np.random.rand(100, 256, 256)  # Example dummy data
+    self.log_message(f"Benchmarking generic algorithm with dummy data shape: {dummy_data.shape}")
+    
+    start_time = time.time()
+    self.inference([{"data": dummy_data}], args)
+    inference_time = time.time() - start_time
+    
+    return {"inference_time": inference_time} 
+```
 
 ## Running debug tool
 

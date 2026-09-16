@@ -4,13 +4,17 @@ All rights reserved
 """
 
 from fastapi import APIRouter, Request, Query
-from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from typing import List, Optional
 from datetime import datetime
 
 from compox.training.TrainingSample import TrainingSample
 from compox.server_utils import generate_uuid
+from compox.exceptions import (
+    CompoxNotFoundError,
+    CompoxTrainingError,
+    CompoxValidationError,
+)
 from compox.pydantic_models import (
     IncomingSampleRequest,
     SampleRecord,
@@ -64,13 +68,12 @@ async def add_sample(
         not_found_files = [
             files[i] for i in range(len(files_exist)) if not files_exist[i]
         ]
-        return JSONResponse(
-            status_code=404,
-            content={
-                "detail": "Input files with the following identifiers not found: {}".format(
-                    "\n".join(not_found_files)
-                )
-            },
+        raise CompoxNotFoundError(
+            "Input files with the following identifiers not found: {}".format(
+                "\n".join(not_found_files)
+            ),
+            code="sample_input_files_not_found",
+            details={"file_ids": not_found_files},
         )
 
     sample_manifest = SampleRecord(
@@ -84,16 +87,10 @@ async def add_sample(
         database_connection, sample_manifest=sample_manifest.model_dump()
     )
 
-    try:
-        training_sample.save_sample_manifest()
-        return SampleResponse(
-            sample_id=sample_id,
-        )
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Failed to add sample: {e}"},
-        )
+    training_sample.save_sample_manifest()
+    return SampleResponse(
+        sample_id=sample_id,
+    )
 
 
 @router.get(
@@ -134,9 +131,9 @@ async def list_samples(
         all_samples = database_connection.list_objects("sample-store")
 
         if len(all_samples) == 0:
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "No samples found in the sample store"},
+            raise CompoxNotFoundError(
+                "No samples found in the sample store",
+                code="samples_not_found",
             )
 
         samples = []
@@ -154,13 +151,16 @@ async def list_samples(
                 except ValidationError as _:
                     continue
         return samples
+    except CompoxNotFoundError:
+        raise
+    except CompoxTrainingError:
+        raise
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": f"Failed to list samples due to an internal server error: {e}"
-            },
-        )
+        raise CompoxTrainingError(
+            "Failed to list samples due to an internal server error.",
+            code="sample_list_failed",
+            cause=e,
+        ) from e
 
 
 @router.get(
@@ -188,22 +188,27 @@ async def get_sample(sample_id: str, request: Request):
     """
     database_connection = request.app.state.database_connection
     try:
-        try:
-            training_sample = TrainingSample(
-                database_connection, sample_id=sample_id
-            )
-        except Exception as e:
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "Sample not found: " + str(e)},
-            )
+        training_sample = TrainingSample(
+            database_connection, sample_id=sample_id
+        )
 
         return SampleRecord(**training_sample.sample_manifest.model_dump())
-    except Exception as _:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "Failed to get sample"},
-        )
+    except CompoxNotFoundError:
+        raise
+    except ValidationError as e:
+        raise CompoxValidationError(
+            "Invalid sample record.",
+            code="invalid_sample_record",
+            details={"sample_id": sample_id},
+            cause=e,
+        ) from e
+    except Exception as e:
+        raise CompoxTrainingError(
+            "Failed to get sample.",
+            code="sample_get_failed",
+            details={"sample_id": sample_id},
+            cause=e,
+        ) from e
 
 
 @router.delete(
@@ -237,9 +242,10 @@ async def delete_sample(sample_id: str, request: Request) -> ResponseMessage:
         )
 
         if not objects_exist[0]:
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "Sample not found"},
+            raise CompoxNotFoundError(
+                "Sample not found",
+                code="sample_not_found",
+                details={"sample_id": sample_id},
             )
 
         training_sample = TrainingSample(
@@ -248,12 +254,15 @@ async def delete_sample(sample_id: str, request: Request) -> ResponseMessage:
 
         training_sample.delete_sample_manifest()
 
-        return JSONResponse(
-            status_code=200,
-            content={"detail": "Sample deleted successfully"},
-        )
-    except Exception as _:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "Failed to delete sample"},
-        )
+        return ResponseMessage(detail="Sample deleted successfully")
+    except CompoxNotFoundError:
+        raise
+    except CompoxTrainingError:
+        raise
+    except Exception as e:
+        raise CompoxTrainingError(
+            "Failed to delete sample.",
+            code="sample_delete_failed",
+            details={"sample_id": sample_id},
+            cause=e,
+        ) from e

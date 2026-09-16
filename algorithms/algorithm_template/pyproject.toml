@@ -17,5 +17,8 @@ additional_parameters = [
     {name = "scale", displayed_name = "Scale", description = "Multiplier applied to the input data.", config = {type = "float", default = 1.0, decimal_precision = 2, adjustable = true}},
     {name = "bias", displayed_name = "Bias", description = "Bias added after scaling.", config = {type = "float", default = 0.0, decimal_precision = 2, adjustable = true}},
 ]
+benchmark_outputs = [
+    {name = "inference_time", description = "Time taken for inference in seconds.", config = {type = "float", decimal_precision = 4}},
+]
 check_importable = false
 obfuscate = true

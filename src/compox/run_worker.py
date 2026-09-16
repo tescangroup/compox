@@ -9,6 +9,7 @@ from compox.config.server_settings import get_server_settings
 from compox.internal.logging import configure_logging
 from compox.components.celery_builder import build_celery
 from compox.tasks.celery_task import execution_task_celery  # noqa F401
+from compox.tasks.benchmark_task_celery import benchmark_task_celery  # noqa F401
 from compox.training.training_task_celery import (  # noqa F401
     training_task_celery,
 )

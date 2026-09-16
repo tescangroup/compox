@@ -24,6 +24,7 @@ from compox.database_connection.BaseConnection import BaseConnection
 from compox.database_connection.CompoxAlgorithmBundleConnection import (
     CompoxAlgorithmBundleConnection,
 )
+from compox.exceptions import CompoxBundleError, CompoxError
 
 
 class BuiltinAlgorithmImporter:
@@ -141,8 +142,9 @@ class BuiltinAlgorithmImporter:
                     return
 
                 if not self._source_collections_exist(source_db):
-                    raise ValueError(
-                        "Bundle storage is missing required collections."
+                    raise CompoxBundleError(
+                        "Bundle storage is missing required collections.",
+                        code="bundle_missing_required_collections",
                     )
 
                 for algorithm_key in self._normalize_keys(
@@ -174,8 +176,11 @@ class BuiltinAlgorithmImporter:
                         imported += 1
                     except Exception as e:
                         failed += 1
-                        raise RuntimeError(
-                            f"Failed to import builtin algorithm '{algorithm_key}' from storage bundle: {e}"
+                        raise CompoxBundleError(
+                            f"Failed to import builtin algorithm '{algorithm_key}' from storage bundle.",
+                            code="builtin_algorithm_import_failed",
+                            details={"algorithm_key": algorithm_key},
+                            cause=e,
                         ) from e
 
                 self._write_state(
@@ -189,6 +194,15 @@ class BuiltinAlgorithmImporter:
                     }
                 )
             except Exception as e:
+                failure = (
+                    e
+                    if isinstance(e, CompoxError)
+                    else CompoxBundleError(
+                        "Builtin algorithm bundle import failed.",
+                        code="builtin_algorithm_bundle_import_failed",
+                        cause=e,
+                    )
+                )
                 rollback_error = self._rollback_journal(rollback_journal)
                 self._write_state(
                     {
@@ -202,7 +216,9 @@ class BuiltinAlgorithmImporter:
                         "last_import_completed_at": str(datetime.now()),
                         "imported_algorithms": imported,
                         "failed_algorithms": failed,
-                        "error": str(e),
+                        "error": str(failure),
+                        "error_code": failure.code,
+                        "retryable": failure.retryable,
                         "rollback_status": (
                             "FAILED"
                             if rollback_error is not None
@@ -215,7 +231,9 @@ class BuiltinAlgorithmImporter:
                         ),
                     }
                 )
-                raise
+                if failure is e:
+                    raise
+                raise failure from e
 
     def _build_bundle_storage_connection(
         self, resolved_bundle_path: str | None = None

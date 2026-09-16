@@ -73,6 +73,15 @@ The `input_data` dictionary contains identifiers provided by the user (commonly 
 
 **Why this exists:** separating the pipeline makes data flow and logging explicit, enables progress reporting, and allows easier debugging.
 
+### Benchmarking (optional)
+If you want to measure algorithm performance, you can implement an optional `benchmark(self, args: dict | None = None) -> dict` method on your `Runner`.
+
+The method should run representative inference on synthetic or sample data and return a dictionary of measured metrics (for example inference time, memory usage, or VRAM usage).
+
+If you expose benchmark metrics, declare their schema in `pyproject.toml` using `benchmark_outputs` so clients can validate and display them consistently.
+
+**Why this exists:** benchmarking helps compare algorithm variants and hardware setups in a reproducible way.
+
 ### The `fetch_data` method for BaseRunner
 `fetch_data` retrieves datasets by IDs and validates them using a Pydantic schema. It expects a list of file ID strings.
 
@@ -252,6 +261,16 @@ Training parameters use the same schema as additional parameters:
 ```toml
 training_parameters = [
   { name = "epochs", displayed_name = "Epochs", description = "Training epochs.", config = { type = "int", default = 10, adjustable = true } },
+]
+```
+
+### Benchmark outputs (optional)
+If your `Runner` implements a `benchmark(...)` method and returns benchmark metrics,
+declare those metrics in `benchmark_outputs` so clients can validate and display them.
+
+```toml
+benchmark_outputs = [
+  { name = "inference_time", description = "Time taken for inference in seconds.", config = { type = "float", decimal_precision = 4 } },
 ]
 ```
 

@@ -4,7 +4,6 @@ All rights reserved
 """
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
 import json
 from datetime import datetime
 from compox.pydantic_models import (
@@ -16,6 +15,12 @@ from compox.pydantic_models import (
 from compox.server_utils import generate_uuid, find_algorithm_by_id
 from compox.training.TrainingSample import TrainingSample
 from compox.tasks.StopRequest import StopRequest
+from compox.exceptions import (
+    CompoxError,
+    CompoxNotFoundError,
+    CompoxTaskError,
+    CompoxValidationError,
+)
 
 STOPPABLE_STATES = {"PENDING", "RUNNING", "STARTED"}
 TERMINAL_STATES = {"STOPPED", "FAILED", "COMPLETED"}
@@ -70,13 +75,12 @@ def train_algorithm(
             for i in range(len(samples_exist))
             if not samples_exist[i]
         ]
-        return JSONResponse(
-            status_code=404,
-            content={
-                "detail": "Input samples with the following identifiers not found: {}".format(
-                    "\n".join(not_found_samples)
-                )
-            },
+        raise CompoxNotFoundError(
+            "Input samples with the following identifiers not found: {}".format(
+                "\n".join(not_found_samples)
+            ),
+            code="input_samples_not_found",
+            details={"missing_sample_ids": not_found_samples},
         )
 
     # check whether files associated with samples are present
@@ -90,13 +94,12 @@ def train_algorithm(
         not_found_files.extend(missing_files)
 
     if len(not_found_files) > 0:
-        return JSONResponse(
-            status_code=404,
-            content={
-                "detail": "Files (associated with input sample) with the following identifiers not found: {}".format(
-                    "\n".join(not_found_files)
-                )
-            },
+        raise CompoxNotFoundError(
+            "Files (associated with input sample) with the following identifiers not found: {}".format(
+                "\n".join(not_found_files)
+            ),
+            code="sample_files_not_found",
+            details={"missing_file_ids": not_found_files},
         )
 
     # check if algorithm exists and get its JSON
@@ -106,9 +109,10 @@ def train_algorithm(
     )
 
     if algorithm_key is None:
-        return JSONResponse(
-            status_code=404,
-            content={"detail": "Algorithm not found"},
+        raise CompoxNotFoundError(
+            "Algorithm not found",
+            code="algorithm_not_found",
+            details={"algorithm_id": incoming_training_request.algorithm_id},
         )
     # create a new algorithm id for the trained algorithm
 
@@ -206,37 +210,57 @@ async def get_training_record(training_id: str, request: Request):
         fallback_record = emergency_record_store.read_record(
             training_collection_name, training_id
         )
+        primary_record = None
+
         object_exists = database_connection.check_objects_exist(
             training_collection_name, [training_id]
         )[0]
-        if not object_exists:
+        if object_exists:
+            primary_record = TrainingRecord(
+                **json.loads(
+                    database_connection.get_objects(
+                        training_collection_name, [training_id]
+                    )[0]
+                )
+            )
+        else:
+            try:
+                primary_record = TrainingRecord(
+                    **json.loads(
+                        database_connection.get_objects(
+                            training_collection_name, [training_id]
+                        )[0]
+                    )
+                )
+            except Exception:
+                primary_record = None
+
+        if primary_record is None:
             if fallback_record is not None:
                 return TrainingRecord(**fallback_record)
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "Training record not found"},
+            raise CompoxNotFoundError(
+                "Training record not found",
+                code="training_record_not_found",
+                details={"training_id": training_id},
             )
-        primary_record = TrainingRecord(
-            **json.loads(
-                database_connection.get_objects(
-                    training_collection_name, [training_id]
-                )[0]
-            )
-        )
+
         if fallback_record is not None and fallback_record.get("status") == "FAILED":
             if primary_record.status.upper() not in TERMINAL_STATES:
                 return TrainingRecord(**fallback_record)
         return primary_record
 
+    except CompoxError:
+        raise
     except Exception as e:
         fallback_record = emergency_record_store.read_record(
             training_collection_name, training_id
         )
         if fallback_record is not None:
             return TrainingRecord(**fallback_record)
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Failed to get training record: {e}"},
+        raise CompoxTaskError(
+            "Failed to get training record",
+            code="training_record_read_failed",
+            cause=e,
         )
 
 
@@ -271,7 +295,11 @@ async def stop_training(training_id: str, request: Request):
             "training-store", [training_id]
         )[0]
         if not object_exists:
-            return ResponseMessage(detail="Training record not found")
+            raise CompoxNotFoundError(
+                "Training record not found",
+                code="training_record_not_found",
+                details={"training_id": training_id},
+            )
         training_record = TrainingRecord(
             **json.loads(
                 database_connection.get_objects(
@@ -279,13 +307,21 @@ async def stop_training(training_id: str, request: Request):
                 )[0]
             )
         )
+    except CompoxError:
+        raise
     except Exception as e:
-        return ResponseMessage(detail=f"Failed to get training record: {e}")
+        raise CompoxTaskError(
+            "Failed to get training record",
+            code="training_record_read_failed",
+            cause=e,
+        )
 
     status = training_record.status.upper()
     if status not in STOPPABLE_STATES:
-        return ResponseMessage(
-            detail=f"Training in state {status} cannot be stopped"
+        raise CompoxValidationError(
+            f"Training in state {status} cannot be stopped",
+            code="training_not_stoppable",
+            details={"training_id": training_id, "status": status},
         )
 
     try:
@@ -293,4 +329,8 @@ async def stop_training(training_id: str, request: Request):
         stop_request.submit()
         return ResponseMessage(detail="Stop request posted successfully")
     except Exception as e:
-        return ResponseMessage(detail=f"Failed to post stop request: {e}")
+        raise CompoxTaskError(
+            "Failed to post stop request",
+            code="stop_request_failed",
+            cause=e,
+        )

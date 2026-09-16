@@ -9,6 +9,7 @@ from typing import Union
 
 from compox.pydantic_models import RootMessage, ResponseMessage
 from compox.server_utils import check_system_gpu_availability
+from compox.exceptions import CompoxConfigurationError
 
 router = APIRouter(prefix="", tags=["root"])
 
@@ -62,4 +63,8 @@ def read_root(request: Request) -> Union[RootMessage, ResponseMessage]:
             cuda_capable_devices_count=cuda_capable_device_count,
         )
     except Exception as e:
-        return ResponseMessage(detail=str(e))
+        raise CompoxConfigurationError(
+            "Failed to build root server response.",
+            code="root_response_failed",
+            cause=e,
+        ) from e

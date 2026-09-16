@@ -9,6 +9,7 @@ from kombu import Queue
 from compox.config.server_settings import Settings
 from compox.components.db_connection_builder import build_database_connection
 from compox.internal.EmergencyRecordStore import EmergencyRecordStore
+from compox.tasks.TaskHandler import TaskHandler
 
 
 def route_task(name, args, kwargs, options, task=None, **kw):
@@ -32,7 +33,10 @@ def build_celery(settings: Settings) -> Celery:
     Celery
         The Celery instance.
     """
-    
+    TaskHandler._ALGORITHM_CACHE_MAXSIZE = (
+        settings.inference.algorithm_cache_maxsize
+    )
+
     celery = Celery(
             broker=settings.inference.backend_settings.broker_url,
             task_create_missing_queues=True,

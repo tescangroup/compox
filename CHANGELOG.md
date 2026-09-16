@@ -1,3 +1,33 @@
+# v3.2.0 (16-09-2026)
+
+## Added
+- Algorithm benchmarking API: `POST /api/v0/benchmark-algorithm` starts a benchmark using an algorithm's synthetic-data `benchmark()` implementation, and `GET /api/v0/benchmarks/{benchmark_id}` returns its persisted status, log, and result data.
+- Benchmark execution support for both FastAPI background tasks and Celery, including stop/failure handling and emergency-record fallback. Server startup initializes a `benchmark-store` collection.
+- `benchmark_outputs` algorithm metadata and a `BaseRunner.benchmark()` extension point; the algorithm template and workflow documentation include the benchmark contract.
+- Algorithm storage metrics in algorithm records and responses: logical byte size, module/asset/checkpoint size breakdowns and counts, plus the recomputation timestamp. Metrics account for unique referenced module and asset objects within an algorithm.
+- `get_object_sizes()` storage-backend support and implementations for S3, in-memory, and temporary-file connections.
+- `Image2MultiRegionSegmentationRunner`, `MultiRegionSegmentationSchema`, shared HDF5 helpers, and a multi-region segmentation algorithm template.
+
+## Changed
+- API failures are now normalized through typed Compox exceptions. Error responses consistently include a machine-readable `code` and `retryable` flag, while retaining `detail`; task and emergency records retain structured failure metadata.
+- Algorithm deployment, export, bundle validation/import, execution, training, checkpoints, files, and storage errors now expose specific typed errors with stable codes and contextual details. Server-side errors continue to avoid exposing their internal cause in API responses.
+- `inference.algorithm_cache_maxsize` configures the runner cache capacity. Cache keys now use a tuple of argument representations rather than a concatenated string.
+- Algorithm deployment, training, checkpoint, and algorithm-record timestamps are now stored as UTC ISO 8601 timestamps.
+- S3 lifecycle configuration requests now include `Content-MD5` for MinIO compatibility. Retried object uploads use exponential backoff, and S3 object sizes are retrieved without downloading object bodies.
+- Deployment tolerates transient file locks when renaming staged module directories.
+- Algorithm records with missing or stale storage metrics refresh them lazily when read; checkpoint changes mark the parent algorithm's metrics stale and algorithm-version deletion recomputes them.
+
+## Fixed
+- Corrected the bundle build/import CLI commands so they honor the CLI configuration path and overrides.
+- Checkpoint deletion no longer makes a redundant existence check before loading the checkpoint record.
+- The built-in MinIO downloader now uses pinned GitHub release assets and fails on unsuccessful HTTP responses.
+- Removed unsuitable thresholding options from the multi-region segmentation template.
+
+## Compatibility Notes
+- Custom `BaseConnection` implementations should add `get_object_sizes(collection_name, object_names)` to support algorithm storage metrics.
+- Clients that parse error bodies should accept the additional `code` and `retryable` fields. The existing `detail` field is preserved.
+- Existing algorithm records without metrics are refreshed lazily by the algorithm-list APIs; installations will also gain the `benchmark-store` collection at startup.
+
 # v3.1.0 (19-05-2026)
 ## Added
 - Compox algorithm bundle support, including bundle building, bundle-backed storage access, builtin bundle import, and persistent zip-based runtime importing.

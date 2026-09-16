@@ -14,6 +14,7 @@ from loguru import logger
 import numpy as np
 
 from compox.algorithm_utils.io_schemas import DataSchema
+from compox.internal.hdf5_io import HDF5IO
 from compox.server_utils import generate_uuid
 
 
@@ -148,36 +149,6 @@ class TempStore:
             raise ValueError(f"Path escapes temp root: {p}")
         return rp
 
-    def _read_dset(self, dset: h5py.Dataset) -> object:
-        """
-        Read an HDF5 dataset and return a Python/NumPy value.
-
-        Tries to interpret variable-length UTF-8 string datasets via
-        ``Dataset.asstr()[()]``. Falls back to raw reads and decoding of
-        byte-like scalars when appropriate.
-
-        Parameters
-        ----------
-        dset : h5py.Dataset
-            Dataset object to read.
-
-        Returns
-        -------
-        object
-            A decoded ``str`` (for string datasets), ``numpy.ndarray``,
-            scalar number, or other object depending on dataset contents.
-        """
-        try:
-            return dset.asstr()[()]
-        except (TypeError, ValueError, UnicodeDecodeError):
-            # fall back to raw read + optional decode
-            val = dset[()]
-            return (
-                val.decode("utf-8")
-                if isinstance(val, (bytes, bytearray, np.bytes_))
-                else val
-            )
-
     def mkdir(self, path: str | Path) -> Path:
         """
         Create a directory inside the temporary storage.
@@ -259,14 +230,7 @@ class TempStore:
                             f"Value for key '{key}' is None, skipping."
                         )
                         continue
-                    # strings vs arrays
-                    if isinstance(val, str):
-                        dt = h5py.string_dtype(encoding="utf-8")
-                        f.create_dataset(
-                            key, data=np.array(val, dtype=object), dtype=dt
-                        )
-                    else:
-                        f.create_dataset(key, data=val)
+                    HDF5IO.write_dataset(f, key, val)
             if self._atomic:
                 os.replace(tmp, dst)
             return str(dst)
@@ -328,10 +292,12 @@ class TempStore:
             with h5py.File(path, "r") as f:
                 if keys:
                     for k in keys:
-                        data[k] = self._read_dset(f[k]) if k in f else None
+                        data[k] = (
+                            HDF5IO.read_dataset(f[k]) if k in f else None
+                        )
                 else:
                     for k in f.keys():
-                        data[k] = self._read_dset(f[k])
+                        data[k] = HDF5IO.read_dataset(f[k])
 
             return data
 

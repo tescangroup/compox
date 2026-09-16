@@ -163,6 +163,7 @@ class InferenceSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     device: Literal["cuda", "cpu", "mps"] = "cuda"
     cuda_visible_devices: str = "0"
+    algorithm_cache_maxsize: int = Field(default=1, ge=1)
     backend_settings: Annotated[
         Union[FastAPITaskSettings, CelerySettings],
         Field(discriminator="executor"),

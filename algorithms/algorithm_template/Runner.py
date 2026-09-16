@@ -4,6 +4,8 @@ All rights reserved
 """
 
 import os
+import numpy as np
+import time
 
 from compox.algorithm_debug import debug
 from compox.algorithm_utils.BaseRunner import BaseRunner
@@ -64,6 +66,22 @@ class Runner(BaseRunner):
         """
         self.log_message("Postprocessing generic inference output.")
         return self.post_data(inference_output, GenericSchema)
+
+    def benchmark(self, args: dict | None = None) -> dict:
+        """
+        Benchmark algorithm performance on synthetic input.
+        """
+        dummy_data = np.random.rand(100, 256, 256)  # Example dummy data
+
+        self.log_message(
+            f"Benchmarking generic algorithm with dummy data shape: {dummy_data.shape}"
+        )
+
+        start_time = time.time()
+        self.inference([{"data": dummy_data}], args)
+        inference_time = time.time() - start_time
+
+        return {"inference_time": inference_time}
 
 
 if __name__ == "__main__":

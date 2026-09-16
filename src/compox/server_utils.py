@@ -238,20 +238,26 @@ def weak_lru(maxsize=128, typed=False):
     return wrapper
 
 
-def algorithm_cache(maxsize=None):
+def algorithm_cache(maxsize=None, maxsize_attr: str | None = None):
     """
-        A cache decorator for algorithms. The cache is based on the algorithm_id and device.
-        The cache is implemented as a dictionary with a maximum size. When the algorithm is requested
-        the cache is checked and if the algorithm with the same algorithm_id and device is found
-        the algorithm's Runner object is returned from the cache. If the algorithm is not found in the
-        cache the algorithm is executed and the result is stored in the cache. If the cache size limit
-        is reached the oldest cache entry is invalidated.
+    A cache decorator for algorithms. The cache is based on the algorithm_id and device.
+    The cache is implemented as a dictionary with a maximum size. When the algorithm is requested
+    the cache is checked and if the algorithm with the same algorithm_id and device is found
+    the algorithm's Runner object is returned from the cache. If the algorithm is not found in the
+    cache the algorithm is executed and the result is stored in the cache. If the cache size limit
+    is reached the oldest cache entry is invalidated.
 
-        Parameters
-        ----------
-        maxsize : int, optional
-            The maximum size of the cache. The default is None.
-    ;
+    Parameters
+    ----------
+    maxsize : int, optional
+        The maximum size of the cache. The default is None.
+    maxsize_attr : str, optional
+        The attribute name to get the maximum size from the class. The default is None.
+
+    Returns
+    -------
+    function
+        The decorated function.
     """
     cache = {}
     access_order = deque()
@@ -260,7 +266,12 @@ def algorithm_cache(maxsize=None):
         def inner_wrapper(self, *args):
             # Generate a unique key based on the method name and arguments
 
-            key = "".join([str(arg) for arg in args])
+            key = tuple(repr(arg) for arg in args)
+            current_maxsize = (
+                getattr(type(self), maxsize_attr, maxsize)
+                if maxsize_attr is not None
+                else maxsize
+            )
 
             if key in cache:
                 # Update access order
@@ -273,7 +284,11 @@ def algorithm_cache(maxsize=None):
                 access_order.append(key)
 
                 # Check if cache size limit is reached
-                if maxsize is not None and len(cache) > maxsize:
+                while (
+                    current_maxsize is not None
+                    and current_maxsize >= 0
+                    and len(cache) > current_maxsize
+                ):
                     # Invalidate the oldest cache entry
                     oldest_key = access_order.popleft()
                     del cache[oldest_key]
@@ -307,7 +322,7 @@ def data_cache(maxsize=None):
         def inner_wrapper(self, *args):
             # Generate a unique key based on the method name and arguments
 
-            key = "".join([str(arg) for arg in args])
+            key = tuple(repr(arg) for arg in args)
 
             if key in cache:
                 # Update access order

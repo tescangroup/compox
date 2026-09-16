@@ -152,6 +152,33 @@ class InMemoryConnection(BaseConnection):
         collection = self.store.get(collection_name, {})
         return [collection[name] for name in object_names]
 
+    def get_object_sizes(
+        self, collection_name: str, object_names: list[str]
+    ) -> list[int]:
+        """
+        Return byte sizes for the specified objects.
+
+        Parameters
+        ----------
+        collection_name : str
+            The name of the collection.
+        object_names : list[str]
+            A list of object names.
+
+        Returns
+        -------
+        list[int]
+            A list of object sizes in bytes.
+        """
+        collection = self.store.get(collection_name, {})
+        sizes = []
+        for name in object_names:
+            obj = collection[name]
+            if isinstance(obj, str):
+                obj = obj.encode("utf-8")
+            sizes.append(len(obj))
+        return sizes
+
     def put_objects(
         self,
         collection_name: str,

@@ -4,7 +4,6 @@ All rights reserved
 """
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
 from compox.pydantic_models import (
     ExecutionRecord,
     ExecutionResponse,
@@ -15,6 +14,13 @@ import json
 from datetime import datetime
 from compox.server_utils import generate_uuid, find_algorithm_by_id
 from compox.tasks.StopRequest import StopRequest
+from compox.exceptions import (
+    CompoxConfigurationError,
+    CompoxError,
+    CompoxNotFoundError,
+    CompoxTaskError,
+    CompoxValidationError,
+)
 
 
 STOPPABLE_STATES = {"PENDING", "RUNNING", "STARTED"}
@@ -71,13 +77,12 @@ def execute_algorithm(
             for i in range(len(files_exist))
             if not files_exist[i]
         ]
-        return JSONResponse(
-            status_code=404,
-            content={
-                "detail": "Input datasets with the following identifiers not found: {}".format(
-                    "\n".join(not_found_files)
-                )
-            },
+        raise CompoxNotFoundError(
+            "Input datasets with the following identifiers not found: {}".format(
+                "\n".join(not_found_files)
+            ),
+            code="input_datasets_not_found",
+            details={"missing_dataset_ids": not_found_files},
         )
 
     # check if algorithm exists
@@ -86,9 +91,12 @@ def execute_algorithm(
         database_connection.list_objects("algorithm-store"),
     )
     if algorithm_id is None:
-        return JSONResponse(
-            status_code=404,
-            content={"detail": "Algorithm not found"},
+        raise CompoxNotFoundError(
+            "Algorithm not found",
+            code="algorithm_not_found",
+            details={
+                "algorithm_id": incoming_execution_request.algorithm_id
+            },
         )
     # save execution record to db
     execution_record = ExecutionRecord(
@@ -152,10 +160,11 @@ def execute_algorithm(
             emergency_record_store=request.app.state.emergency_record_store,
         )
     else:
-        raise Exception(
-            "Server backend {} not supported:".format(
+        raise CompoxConfigurationError(
+            "Server backend {} not supported".format(
                 settings.inference.backend_settings.executor
-            )
+            ),
+            code="invalid_server_backend",
         )
 
     return ExecutionResponse(execution_id=execution_id)
@@ -191,41 +200,42 @@ async def stop_execution(id: str, request: Request) -> ResponseMessage:
             "execution-store", [id]
         )[0]
         if not object_exists:
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "Execution record not found"},
+            raise CompoxNotFoundError(
+                "Execution record not found",
+                code="execution_record_not_found",
+                details={"execution_id": id},
             )
         execution_record = ExecutionRecord(
             **json.loads(
                 database_connection.get_objects("execution-store", [id])[0]
             )
         )
+    except CompoxError:
+        raise
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Failed to get execution record: {e}"},
+        raise CompoxTaskError(
+            "Failed to get execution record",
+            code="execution_record_read_failed",
+            cause=e,
         )
 
     status = execution_record.status.upper()
     if status not in STOPPABLE_STATES:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "detail": f"Execution in state {status} cannot be stopped"
-            },
+        raise CompoxValidationError(
+            f"Execution in state {status} cannot be stopped",
+            code="execution_not_stoppable",
+            details={"execution_id": id, "status": status},
         )
 
     try:
         stop_request = StopRequest(id, database_connection)
         stop_request.submit()
-        return JSONResponse(
-            status_code=200,
-            content={"detail": "Stop request posted successfully"},
-        )
+        return ResponseMessage(detail="Stop request posted successfully")
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Failed to post stop request: {e}"},
+        raise CompoxTaskError(
+            "Failed to post stop request",
+            code="stop_request_failed",
+            cause=e,
         )
 
 
@@ -264,9 +274,10 @@ async def get_execution_record(id: str, request: Request) -> ExecutionRecord:
         if not object_exists:
             if fallback_record is not None:
                 return ExecutionRecord(**fallback_record)
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "Execution record not found"},
+            raise CompoxNotFoundError(
+                "Execution record not found",
+                code="execution_record_not_found",
+                details={"execution_id": id},
             )
         primary_record = ExecutionRecord(
             **json.loads(
@@ -277,14 +288,16 @@ async def get_execution_record(id: str, request: Request) -> ExecutionRecord:
             if primary_record.status.upper() not in TERMINAL_STATES:
                 return ExecutionRecord(**fallback_record)
         return primary_record
-
+    except CompoxError:
+        raise
     except Exception as e:
         fallback_record = emergency_record_store.read_record(
             "execution-store", id
         )
         if fallback_record is not None:
             return ExecutionRecord(**fallback_record)
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Failed to get execution record: {e}"},
+        raise CompoxTaskError(
+            "Failed to get execution record",
+            code="execution_record_read_failed",
+            cause=e,
         )

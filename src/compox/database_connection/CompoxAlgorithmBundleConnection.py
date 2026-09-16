@@ -9,9 +9,10 @@ import base64
 import hashlib
 import hmac
 import json
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 from compox.database_connection.BaseConnection import BaseConnection
+from compox.exceptions import CompoxBundleError, CompoxConfigurationError
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -73,8 +74,10 @@ class CompoxAlgorithmBundleConnection(BaseConnection):
         """
         super().__init__()
         if AESGCM is None:
-            raise ImportError(
-                "cryptography library is required for CompoxAlgorithmBundleConnection"
+            raise CompoxConfigurationError(
+                "cryptography library is required for CompoxAlgorithmBundleConnection",
+                code="bundle_crypto_dependency_missing",
+                cause=_IMPORT_ERROR,
             ) from _IMPORT_ERROR
 
         self._bundle_path = bundle_path
@@ -139,17 +142,39 @@ class CompoxAlgorithmBundleConnection(BaseConnection):
         with ZipFile(self._bundle_path, "r") as zf:
             for name in object_names:
                 if name not in collection:
-                    raise FileNotFoundError(
-                        f"Object '{name}' not found in collection '{collection_name}'"
+                    raise CompoxBundleError(
+                        f"Object '{name}' not found in collection '{collection_name}'",
+                        code="bundle_object_not_found",
+                        http_status=404,
+                        details={
+                            "collection": collection_name,
+                            "object": name,
+                        },
                     )
                 entry = collection[name]
-                ciphertext = zf.read(entry["blob"])
-                nonce = base64.b64decode(entry["nonce_b64"])
-                plaintext = self._aesgcm.decrypt(nonce, ciphertext, None)
+                try:
+                    ciphertext = zf.read(entry["blob"])
+                    nonce = base64.b64decode(entry["nonce_b64"])
+                    plaintext = self._aesgcm.decrypt(nonce, ciphertext, None)
+                except Exception as e:
+                    raise CompoxBundleError(
+                        f"Failed to read encrypted bundle object '{collection_name}/{name}'",
+                        code="bundle_object_read_failed",
+                        details={
+                            "collection": collection_name,
+                            "object": name,
+                        },
+                        cause=e,
+                    ) from e
                 digest = hashlib.sha256(plaintext).hexdigest()
                 if digest != entry["sha256"]:
-                    raise ValueError(
-                        f"Checksum mismatch for '{collection_name}/{name}'"
+                    raise CompoxBundleError(
+                        f"Checksum mismatch for '{collection_name}/{name}'",
+                        code="bundle_checksum_mismatch",
+                        details={
+                            "collection": collection_name,
+                            "object": name,
+                        },
                     )
                 outputs.append(plaintext)
         return outputs
@@ -212,28 +237,69 @@ class CompoxAlgorithmBundleConnection(BaseConnection):
         """
         Load and validate the bundle manifest and its HMAC signature.
         """
-        with ZipFile(self._bundle_path, "r") as zf:
-            manifest_bytes = zf.read("manifest.json")
-            manifest_hmac_hex = zf.read("manifest.hmac").decode("utf-8").strip()
+        try:
+            with ZipFile(self._bundle_path, "r") as zf:
+                manifest_bytes = zf.read("manifest.json")
+                manifest_hmac_hex = (
+                    zf.read("manifest.hmac").decode("utf-8").strip()
+                )
+        except (BadZipFile, KeyError, UnicodeDecodeError) as e:
+            raise CompoxBundleError(
+                "Invalid Compox algorithm bundle archive.",
+                code="invalid_algorithm_bundle",
+                http_status=400,
+                details={"path": self._bundle_path},
+                cause=e,
+            ) from e
         calc = hmac.new(self._key, manifest_bytes, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(calc, manifest_hmac_hex):
-            raise ValueError("Invalid bundle HMAC signature for manifest.json")
+            raise CompoxBundleError(
+                "Invalid bundle HMAC signature for manifest.json",
+                code="invalid_bundle_signature",
+                http_status=400,
+            )
 
-        manifest = json.loads(manifest_bytes.decode("utf-8"))
+        try:
+            manifest = json.loads(manifest_bytes.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise CompoxBundleError(
+                "Invalid bundle manifest JSON.",
+                code="invalid_bundle_manifest",
+                http_status=400,
+                cause=e,
+            ) from e
         if manifest.get("format") != "compox-migration-bundle-v1":
-            raise ValueError("Unsupported bundle format")
+            raise CompoxBundleError(
+                "Unsupported bundle format",
+                code="unsupported_bundle_format",
+                http_status=400,
+            )
         if manifest.get("encryption") != "aesgcm":
-            raise ValueError("Unsupported bundle encryption")
+            raise CompoxBundleError(
+                "Unsupported bundle encryption",
+                code="unsupported_bundle_encryption",
+                http_status=400,
+            )
         collections = manifest.get("collections")
         if collections is not None and not isinstance(collections, list):
-            raise ValueError(
-                "Invalid bundle manifest: collections must be a list"
+            raise CompoxBundleError(
+                "Invalid bundle manifest: collections must be a list",
+                code="invalid_bundle_manifest",
+                http_status=400,
             )
         metadata = manifest.get("metadata")
         if metadata is not None and not isinstance(metadata, dict):
-            raise ValueError("Invalid bundle manifest: metadata must be a dict")
+            raise CompoxBundleError(
+                "Invalid bundle manifest: metadata must be a dict",
+                code="invalid_bundle_manifest",
+                http_status=400,
+            )
         if not isinstance(manifest.get("objects"), list):
-            raise ValueError("Invalid bundle manifest: missing objects list")
+            raise CompoxBundleError(
+                "Invalid bundle manifest: missing objects list",
+                code="invalid_bundle_manifest",
+                http_status=400,
+            )
         return manifest
 
     def _build_objects_index(self) -> dict[str, dict[str, dict]]:
@@ -257,7 +323,17 @@ class CompoxAlgorithmBundleConnection(BaseConnection):
         try:
             raw = base64.urlsafe_b64decode(key + "=" * (-len(key) % 4))
         except (ValueError, TypeError) as e:
-            raise ValueError("Invalid bundle key encoding") from e
+            raise CompoxBundleError(
+                "Invalid bundle key encoding",
+                code="invalid_bundle_key",
+                http_status=400,
+                cause=e,
+            ) from e
         if len(raw) != 32:
-            raise ValueError("Bundle key must decode to 32 bytes (AES-256 key)")
+            raise CompoxBundleError(
+                "Bundle key must decode to 32 bytes (AES-256 key)",
+                code="invalid_bundle_key",
+                http_status=400,
+                details={"expected_bytes": 32, "actual_bytes": len(raw)},
+            )
         return raw

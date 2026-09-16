@@ -8,6 +8,12 @@ from typing import Optional, Union, Any
 from loguru import logger
 from compox.database_connection.BaseConnection import BaseConnection
 from compox.training.SampleManifest import SampleManifest
+from compox.exceptions import (
+    CompoxError,
+    CompoxNotFoundError,
+    CompoxTrainingError,
+    CompoxValidationError,
+)
 
 
 class TrainingSample:
@@ -39,8 +45,9 @@ class TrainingSample:
         self.database_connection = database_connection
 
         if (sample_id is None) == (sample_manifest is None):
-            raise ValueError(
-                "Provide exactly one of 'sample_id' or 'sample_manifest'."
+            raise CompoxValidationError(
+                "Provide exactly one of 'sample_id' or 'sample_manifest'.",
+                code="sample_source_invalid",
             )
 
         if sample_manifest is not None:
@@ -190,18 +197,28 @@ class TrainingSample:
                     "sample-store", [self.sample_id]
                 )[0]
             )
+        except CompoxError:
+            raise
         except Exception as e:
-            raise FileNotFoundError(
-                f"Failed to load sample manifest for sample {self.sample_id}: {e}"
-            )
+            raise CompoxNotFoundError(
+                f"Failed to load sample manifest for sample {self.sample_id}.",
+                code="sample_not_found",
+                details={"sample_id": self.sample_id},
+                cause=e,
+            ) from e
 
         try:
             sample_manifest = SampleManifest.model_validate(sample_manifest)
             return sample_manifest
+        except CompoxError:
+            raise
         except Exception as e:
-            raise ValueError(
-                f"Invalid sample manifest for sample {self.sample_id}: {e}"
-            )
+            raise CompoxValidationError(
+                f"Invalid sample manifest for sample {self.sample_id}.",
+                code="invalid_sample_manifest",
+                details={"sample_id": self.sample_id},
+                cause=e,
+            ) from e
 
     def save_sample_manifest(self) -> bool:
         """
@@ -221,9 +238,16 @@ class TrainingSample:
                 [json.dumps(self.sample_manifest.model_dump())],
             )
             return True
+        except CompoxError:
+            raise
         except Exception as e:
             logger.error(f"Failed to save sample {self.sample_id}: {e}")
-            raise e
+            raise CompoxTrainingError(
+                f"Failed to save sample {self.sample_id}.",
+                code="sample_save_failed",
+                details={"sample_id": self.sample_id},
+                cause=e,
+            ) from e
 
     def add_tags(self, new_tags: list[str]) -> None:
         """
@@ -287,9 +311,16 @@ class TrainingSample:
                 "sample-store", [self.sample_id]
             )
             return True
+        except CompoxError:
+            raise
         except Exception as e:
             logger.error(f"Failed to delete sample {self.sample_id}: {e}")
-            raise e
+            raise CompoxTrainingError(
+                f"Failed to delete sample {self.sample_id}.",
+                code="sample_delete_failed",
+                details={"sample_id": self.sample_id},
+                cause=e,
+            ) from e
 
     def _validate_files_exist(self) -> tuple[bool, list[str]]:
         """
@@ -335,8 +366,10 @@ class TrainingSample:
         """
         files_exist, missing_files = self._validate_files_exist()
         if not files_exist:
-            raise FileNotFoundError(
-                f"Cannot promote files to training store. Missing files: {missing_files}"
+            raise CompoxNotFoundError(
+                "Cannot promote files to training store. Some files are missing.",
+                code="sample_files_not_found",
+                details={"missing_files": missing_files},
             )
         file_ids = set(self[:, :])
         for file_id in file_ids:

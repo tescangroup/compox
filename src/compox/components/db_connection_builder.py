@@ -6,6 +6,7 @@ All rights reserved
 from compox.config.server_settings import Settings
 from compox.database_connection.S3Connection import S3Connection
 from compox.database_connection import BaseConnection
+from compox.exceptions import CompoxConfigurationError
 
 
 _DATABASE_BACKEND_TYPE = "s3"
@@ -29,7 +30,7 @@ def build_database_connection(
 
     Raises
     ------
-    ValueError
+    CompoxConfigurationError
         If Database backend is not supported.
     """
 
@@ -49,4 +50,8 @@ def build_database_connection(
         )
         return database_connection
     else:
-        raise ValueError("Database backend not supported")
+        raise CompoxConfigurationError(
+            "Database backend not supported",
+            code="unsupported_database_backend",
+            details={"backend": _DATABASE_BACKEND_TYPE},
+        )

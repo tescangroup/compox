@@ -110,8 +110,10 @@ class AlgorithmRegisteredResponse(BaseModel):
     default_device: str
     additional_parameters: list[AdditionalParameterSchema] = Field(default=[])
     training_parameters: list[AdditionalParameterSchema] = Field(default=[])
+    benchmark_outputs: list[AdditionalParameterSchema] = Field(default=[])
     removable: bool = Field(default=False)
     exportable: bool = Field(default=True)
+    storage_metrics: Optional[Dict[str, Union[int, str]]] = Field(default=None)
 
 
 class AlgorithmDeployResponse(BaseModel):
@@ -317,6 +319,69 @@ class ExecutionLogRecord(BaseModel):
     """
 
     log: str
+
+
+class IncomingBenchmarkRequest(BaseModel):
+    """
+    Incoming benchmark request model.
+
+    Attributes
+    ----------
+    algorithm_id : str
+        The id of the algorithm to benchmark.
+    additional_parameters : dict
+        Additional parameters forwarded to the algorithm's benchmark method.
+    """
+
+    algorithm_id: str
+    additional_parameters: dict = Field(default_factory=dict)
+
+
+class BenchmarkRecord(BaseModel):
+    """
+    Benchmark record model.
+
+    Attributes
+    ----------
+    benchmark_id : str
+        The id of the benchmark job.
+    algorithm_id : str
+        The id of the algorithm.
+    additional_parameters : dict
+        Additional parameters forwarded to the algorithm's benchmark method.
+    status : str
+        The status of the benchmark.
+    time_started : str
+        The time the benchmark started.
+    time_completed : str
+        The time the benchmark completed.
+    log : str
+        The log of the benchmark.
+    data : dict
+        The benchmark result payload.
+    """
+
+    benchmark_id: str
+    algorithm_id: str
+    additional_parameters: dict = Field(default_factory=dict)
+    status: str = Field(default="PENDING")
+    time_started: str = Field(default="")
+    time_completed: str = Field(default="")
+    log: str = Field(default="")
+    data: dict = Field(default_factory=dict)
+
+
+class BenchmarkResponse(BaseModel):
+    """
+    Benchmark response model.
+
+    Attributes
+    ----------
+    benchmark_id : str
+        The id of the benchmark job.
+    """
+
+    benchmark_id: str
 
 
 class IncomingTrainingRequest(BaseModel):
@@ -605,6 +670,19 @@ class ResponseMessage(BaseModel):
     """
 
     detail: str | None = None
+
+
+class ErrorResponse(ResponseMessage):
+    """
+    Structured error response model.
+
+    The inherited ``detail`` field is kept for backward compatibility with
+    existing clients that only read a human-readable message.
+    """
+
+    code: str
+    retryable: bool = Field(default=False)
+    details: Optional[Dict] = Field(default=None)
 
 
 class RootMessage(BaseModel):

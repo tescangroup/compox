@@ -4,12 +4,16 @@ All rights reserved
 """
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
 from starlette.responses import StreamingResponse
 import io
 import h5py
 from compox.server_utils import generate_uuid, calculate_s3_etag
 from compox.pydantic_models import FileUploadResponse, ResponseMessage
+from compox.exceptions import (
+    CompoxFileError,
+    CompoxNotFoundError,
+    CompoxValidationError,
+)
 
 router = APIRouter(prefix="/api", tags=["file-controller"])
 
@@ -46,11 +50,13 @@ async def upload_files(request: Request) -> FileUploadResponse:
     try:
         with h5py.File(bio, "r") as f:
             assert f is not None
-    except Exception as _:
-        return JSONResponse(
-            status_code=422,
-            content={"detail": "The provided file is not a valid hdf5 file."},
-        )
+    except Exception as e:
+        raise CompoxValidationError(
+            "The provided file is not a valid hdf5 file.",
+            code="invalid_hdf5_file",
+            http_status=422,
+            cause=e,
+        ) from e
 
     try:
 
@@ -91,11 +97,14 @@ async def upload_files(request: Request) -> FileUploadResponse:
         return FileUploadResponse(
             file_id=file_id,
         )
+    except CompoxValidationError:
+        raise
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Failed to upload file: {e}"},
-        )
+        raise CompoxFileError(
+            "Failed to upload file.",
+            code="file_upload_failed",
+            cause=e,
+        ) from e
 
 
 @router.get(
@@ -128,10 +137,12 @@ async def download_file(id: str, request: Request):
         try:
             object = database_connection.get_objects("data-store", [id])[0]
         except Exception as e:
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "File not found: " + str(e)},
-            )
+            raise CompoxNotFoundError(
+                "File not found",
+                code="file_not_found",
+                details={"file_id": id},
+                cause=e,
+            ) from e
 
         file_like_obj = io.BytesIO(object)
 
@@ -143,12 +154,15 @@ async def download_file(id: str, request: Request):
         return StreamingResponse(
             chunk_generator(), media_type="application/octet-stream"
         )
+    except CompoxNotFoundError:
+        raise
     except Exception as e:
-        print(e)
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "Failed to download file"},
-        )
+        raise CompoxFileError(
+            "Failed to download file.",
+            code="file_download_failed",
+            details={"file_id": id},
+            cause=e,
+        ) from e
 
 
 @router.delete(
@@ -184,18 +198,20 @@ async def delete_file(id: str, request: Request) -> ResponseMessage:
         )
 
         if not objects_exist[0]:
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "File not found"},
+            raise CompoxNotFoundError(
+                "File not found",
+                code="file_not_found",
+                details={"file_id": id},
             )
 
         database_connection.delete_objects("data-store", [id])
-        return JSONResponse(
-            status_code=200,
-            content={"detail": "File deleted successfully"},
-        )
-    except Exception as _:
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "Failed to delete file"},
-        )
+        return ResponseMessage(detail="File deleted successfully")
+    except CompoxNotFoundError:
+        raise
+    except Exception as e:
+        raise CompoxFileError(
+            "Failed to delete file.",
+            code="file_delete_failed",
+            details={"file_id": id},
+            cause=e,
+        ) from e

@@ -10,6 +10,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from compox.config.server_settings import Settings
+from compox.exceptions import CompoxConfigurationError
 from compox.internal.logging import configure_logging
 import compox
 
@@ -23,7 +24,7 @@ class Compox(uvicorn.Server):
         super().__init__(config)
         self.config = config
         self.logger = logger
-        self._version = importlib.metadata.version('compox')
+        self._version = importlib.metadata.version("compox")
 
     def install_signal_handlers(self):
         pass
@@ -71,13 +72,17 @@ def build_server(
     if settings.ssl.use_ssl:
         if not os.path.exists(settings.ssl.ssl_keyfile):
             backend_logger.error("Cannot find SSL keyfile!")
-            raise FileNotFoundError(
-                f"Cannot find SSL keyfile: {settings.ssl.ssl_keyfile}"
+            raise CompoxConfigurationError(
+                f"Cannot find SSL keyfile: {settings.ssl.ssl_keyfile}",
+                code="ssl_keyfile_not_found",
+                details={"path": settings.ssl.ssl_keyfile},
             )
         if not os.path.exists(settings.ssl.ssl_certfile):
             backend_logger.error("Cannot find SSL certfile!")
-            raise FileNotFoundError(
-                f"Cannot find SSL certfile: {settings.ssl.ssl_certfile}"
+            raise CompoxConfigurationError(
+                f"Cannot find SSL certfile: {settings.ssl.ssl_certfile}",
+                code="ssl_certfile_not_found",
+                details={"path": settings.ssl.ssl_certfile},
             )
 
     backend_logger.info("Configuring server")
@@ -86,7 +91,7 @@ def build_server(
         host="0.0.0.0" if os.name == "posix" else "127.0.0.1",
         port=settings.port,
         reload=False,
-        # use_colors=False, # can't be used when 'default' logger is disabled (see below)
+        ws="none",
         log_config=None,
         log_level=logging.INFO,
         ssl_keyfile=settings.ssl.ssl_keyfile if settings.ssl.use_ssl else None,

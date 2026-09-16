@@ -13,54 +13,14 @@ from typing import Iterator
 from loguru import logger
 
 from compox.database_connection import BaseConnection
+from compox.exceptions import (
+    CompoxAlgorithmError,
+    CompoxNotFoundError,
+    CompoxValidationError,
+)
 from compox.training.AlgorithmCheckpoint import AlgorithmCheckpoint
 
-
 CHUNK_SIZE = 1024 * 1024
-
-
-class AlgorithmError(Exception):
-    """Base class for algorithm-related errors."""
-
-    pass
-
-
-class AlgorithmNotFoundError(AlgorithmError):
-    def __init__(self, algorithm_name: str, major_version: str):
-        self.algorithm_name = algorithm_name
-        self.major_version = major_version
-        super().__init__(
-            f"Algorithm '{algorithm_name}' v{major_version} not found."
-        )
-
-
-class MinorVersionNotFoundError(AlgorithmError):
-    def __init__(
-        self, algorithm_name: str, major_version: str, minor_version: str
-    ):
-        self.algorithm_name = algorithm_name
-        self.major_version = major_version
-        self.minor_version = minor_version
-        super().__init__(
-            f"Algorithm '{algorithm_name}' v{major_version}.{minor_version} not found."
-        )
-
-
-class CheckpointNotFoundError(AlgorithmError):
-    def __init__(self, checkpoint_id: str):
-        self.checkpoint_id = checkpoint_id
-        super().__init__(f"Checkpoint '{checkpoint_id}' not found.")
-
-
-class InvalidCheckpointError(AlgorithmError):
-    def __init__(self, checkpoint_id: str, reason: str):
-        self.checkpoint_id = checkpoint_id
-        self.reason = reason
-        super().__init__(f"Checkpoint '{checkpoint_id}' is invalid: {reason}.")
-
-
-class SecurityError(AlgorithmError):
-    pass
 
 
 class AlgorithmExporter:
@@ -133,8 +93,14 @@ class AlgorithmExporter:
             self.logger.error(
                 f"Algorithm '{algorithm_name}' v{algorithm_major_version} not found."
             )
-            raise AlgorithmNotFoundError(
-                algorithm_name, algorithm_major_version
+            raise CompoxNotFoundError(
+                f"Algorithm '{algorithm_name}' v{algorithm_major_version} not found.",
+                code="algorithm_not_found",
+                details={
+                    "algorithm_name": algorithm_name,
+                    "algorithm_major_version": algorithm_major_version,
+                },
+                cause=ke,
             ) from ke
 
         if not algorithm_minor_version:
@@ -153,10 +119,15 @@ class AlgorithmExporter:
             self.logger.error(
                 f"Algorithm '{algorithm_name}' v{algorithm_major_version}.{exported_minor_version} not found."
             )
-            raise MinorVersionNotFoundError(
-                algorithm_name,
-                algorithm_major_version,
-                exported_minor_version,
+            raise CompoxNotFoundError(
+                f"Algorithm '{algorithm_name}' v{algorithm_major_version}.{exported_minor_version} not found.",
+                code="minor_version_not_found",
+                details={
+                    "algorithm_name": algorithm_name,
+                    "algorithm_major_version": algorithm_major_version,
+                    "algorithm_minor_version": exported_minor_version,
+                },
+                cause=ke,
             ) from ke
 
         assets_dict: dict[str, str] = minor_version_record.get("assets", {})
@@ -169,7 +140,12 @@ class AlgorithmExporter:
                 )
             except Exception as e:
                 self.logger.error(f"Failed to load algorithm checkpoint: {e}")
-                raise CheckpointNotFoundError(algorithm_checkpoint_id) from e
+                raise CompoxNotFoundError(
+                    f"Checkpoint '{algorithm_checkpoint_id}' not found.",
+                    code="checkpoint_not_found",
+                    details={"checkpoint_id": algorithm_checkpoint_id},
+                    cause=e,
+                ) from e
 
             # override the algorithm assets with the ones from the checkpoint
             for (
@@ -183,9 +159,14 @@ class AlgorithmExporter:
                         f"Failed to override asset '{key}' from checkpoint: {e}. "
                         "Make sure the checkpoint is compatible with the algorithm."
                     )
-                    raise InvalidCheckpointError(
-                        algorithm_checkpoint_id,
-                        f"failed to override asset '{key}': {e}",
+                    raise CompoxValidationError(
+                        f"Checkpoint '{algorithm_checkpoint_id}' is invalid: failed to override asset '{key}': {e}.",
+                        code="invalid_checkpoint",
+                        details={
+                            "checkpoint_id": algorithm_checkpoint_id,
+                            "asset_key": key,
+                        },
+                        cause=e,
                     ) from e
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_root = Path(tmpdir)
@@ -300,8 +281,10 @@ class AlgorithmExporter:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
-            raise ValueError(
-                f"Algorithm record for key '{key}' is not valid JSON."
+            raise CompoxAlgorithmError(
+                f"Algorithm record for key '{key}' is not valid JSON.",
+                code="invalid_algorithm_record",
+                cause=e,
             ) from e
 
         return data
@@ -377,8 +360,10 @@ class AlgorithmExporter:
         try:
             target_resolved.relative_to(root_resolved)
         except ValueError as e:
-            raise SecurityError(
-                f"Path traversal attempt detected: {target_path}"
+            raise CompoxValidationError(
+                f"Path traversal attempt detected: {target_path}",
+                code="algorithm_export_security_error",
+                cause=e,
             ) from e
 
     def _make_zip_from_directory(

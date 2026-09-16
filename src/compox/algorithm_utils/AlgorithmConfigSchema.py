@@ -210,6 +210,7 @@ class AlgorithmConfigSchema(BaseModel):
         "Image2Alignment",
         "Image2Image",
         "Image2Segmentation",
+        "Image2MultiRegionSegmentation",
         "Image2Embedding",
         "Undefined",
         "Generic",
@@ -222,6 +223,9 @@ class AlgorithmConfigSchema(BaseModel):
         default_factory=list
     )
     training_parameters: List[AdditionalParameterSchema] = Field(
+        default_factory=list
+    )
+    benchmark_outputs: List[AdditionalParameterSchema] = Field(
         default_factory=list
     )
     removable: bool = False

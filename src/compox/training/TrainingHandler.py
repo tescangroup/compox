@@ -5,7 +5,7 @@ All rights reserved
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from loguru import logger
 from pathlib import Path
 from typing import Type, List
@@ -19,6 +19,14 @@ from compox.training.TempStore import TempStore
 from compox.training.AlgorithmCheckpoint import AlgorithmCheckpoint
 from compox.algorithm_utils.io_schemas import DataSchema
 from compox.internal.EmergencyRecordStore import EmergencyRecordStore
+from compox.exceptions import (
+    CompoxAssetError,
+    CompoxCheckpointError,
+    CompoxError,
+    CompoxNotFoundError,
+    CompoxStateError,
+    CompoxTrainingError,
+)
 
 
 class TrainingHandler(TaskHandler):
@@ -92,14 +100,7 @@ class TrainingHandler(TaskHandler):
         Exception
         """
         self._state = state
-        if self.database_update:
-            try:
-                training_record = self._get_task_record()
-                training_record["state"] = state
-                self._save_task_record(training_record)
-            except Exception as e:
-                self.mark_as_failed(e)
-                raise e
+        self._update_task_record_field("state", state)
 
     def _post_assets(
         self, assets: dict[str, bytes], asset_ids: list[str]
@@ -136,9 +137,17 @@ class TrainingHandler(TaskHandler):
             )
             # log the posting time with 4 decimal places
             self.logger.info(f"Uploaded {len(assets)} assets to the database.")
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise ValueError(f"Failed to upload assets: {e}")
+            raise
+        except Exception as e:
+            error = CompoxAssetError(
+                "Failed to upload assets",
+                code="asset_upload_failed",
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
     def _remove_assets(self, asset_ids: list[str]) -> None:
         """
@@ -165,9 +174,18 @@ class TrainingHandler(TaskHandler):
             self.logger.info(
                 f"Removed {len(asset_ids)} assets from the database."
             )
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise ValueError(f"Failed to remove assets: {e}")
+            raise
+        except Exception as e:
+            error = CompoxAssetError(
+                "Failed to remove assets",
+                code="asset_remove_failed",
+                details={"asset_ids": asset_ids},
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
     def get_training_dataset(
         self, training_sample_ids: list[str]
@@ -192,8 +210,9 @@ class TrainingHandler(TaskHandler):
         """
         try:
             if not training_sample_ids:
-                raise ValueError(
-                    "Training sample ID not found in training record."
+                raise CompoxNotFoundError(
+                    "Training sample ID not found in training record.",
+                    code="training_samples_not_found",
                 )
             training_samples = [
                 TrainingSample(self.database_connection, sample_id=sample_id)
@@ -202,9 +221,18 @@ class TrainingHandler(TaskHandler):
 
             combined_dataset = TrainingDataset(samples=training_samples)
             return combined_dataset
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise ValueError(f"Failed to retrieve training dataset: {e}")
+            raise
+        except Exception as e:
+            error = CompoxTrainingError(
+                "Failed to retrieve training dataset",
+                code="training_dataset_retrieval_failed",
+                details={"training_sample_ids": training_sample_ids},
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
     def save_training_files_to_temp_store(
         self,
@@ -240,7 +268,10 @@ class TrainingHandler(TaskHandler):
             If saving files to temporary store failed.
         """
         if self.temp_store is None:
-            raise ValueError("TempStore is not initialized.")
+            raise CompoxStateError(
+                "TempStore is not initialized.",
+                code="temp_store_not_initialized",
+            )
 
         try:
             self.logger.info("Saving files to temporary store.")
@@ -253,9 +284,17 @@ class TrainingHandler(TaskHandler):
             )
             self.logger.info("Saved files to temporary store.")
             return paths
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise ValueError(f"Failed to save files to temporary store: {e}")
+            raise
+        except Exception as e:
+            error = CompoxTrainingError(
+                "Failed to save files to temporary store",
+                code="temp_store_save_failed",
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
     def download_files_to_temp_store(
         self,
@@ -296,7 +335,10 @@ class TrainingHandler(TaskHandler):
             If downloading files to temporary store failed.
         """
         if self.temp_store is None:
-            raise ValueError("TempStore is not initialized.")
+            raise CompoxStateError(
+                "TempStore is not initialized.",
+                code="temp_store_not_initialized",
+            )
 
         try:
             self.temp_store.mkdir(folder_path)
@@ -314,11 +356,18 @@ class TrainingHandler(TaskHandler):
                 )
                 paths.extend(batch_paths)
             return paths
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise ValueError(
-                f"Failed to download files to temporary store: {e}"
+            raise
+        except Exception as e:
+            error = CompoxTrainingError(
+                "Failed to download files to temporary store",
+                code="temp_store_download_failed",
+                details={"file_ids": file_ids},
+                cause=e,
             )
+            self.mark_as_failed(error)
+            raise error from e
 
     def download_dataset_to_temp_store(
         self,
@@ -352,7 +401,10 @@ class TrainingHandler(TaskHandler):
             with local paths in the temporary store instead of file IDs.
         """
         if self.temp_store is None:
-            raise ValueError("TempStore is not initialized.")
+            raise CompoxStateError(
+                "TempStore is not initialized.",
+                code="temp_store_not_initialized",
+            )
 
         local_samples = []
         try:
@@ -366,8 +418,10 @@ class TrainingHandler(TaskHandler):
                     local_samples[-1].append({})
                     for key, file_ids in file.items():
                         if key not in pydantic_data_schemas:
-                            raise ValueError(
-                                f"Pydantic data schema for key '{key}' not provided."
+                            raise CompoxTrainingError(
+                                f"Pydantic data schema for key '{key}' not provided.",
+                                code="training_data_schema_missing",
+                                details={"sample_key": key},
                             )
                         self.temp_store.mkdir(
                             os.path.join(sample_id, file_name, key)
@@ -383,11 +437,17 @@ class TrainingHandler(TaskHandler):
                         local_samples[-1][-1][key] = paths
 
             return local_samples
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise ValueError(
-                f"Failed to download training dataset to temporary store: {e}"
+            raise
+        except Exception as e:
+            error = CompoxTrainingError(
+                "Failed to download training dataset to temporary store",
+                code="training_dataset_download_failed",
+                cause=e,
             )
+            self.mark_as_failed(error)
+            raise error from e
 
     def load_dataset_from_temp_store(
         self,
@@ -411,7 +471,10 @@ class TrainingHandler(TaskHandler):
             dictionaries instead of file IDs.
         """
         if self.temp_store is None:
-            raise ValueError("TempStore is not initialized.")
+            raise CompoxStateError(
+                "TempStore is not initialized.",
+                code="temp_store_not_initialized",
+            )
 
         data_list = []
         try:
@@ -426,11 +489,17 @@ class TrainingHandler(TaskHandler):
                         data_dicts = self.load_files_from_temp_store(paths)
                         data_list[-1][-1][key] = data_dicts
             return data_list
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise ValueError(
-                f"Failed to load training dataset from temporary store: {e}"
+            raise
+        except Exception as e:
+            error = CompoxTrainingError(
+                "Failed to load training dataset from temporary store",
+                code="training_dataset_load_failed",
+                cause=e,
             )
+            self.mark_as_failed(error)
+            raise error from e
 
     def load_files_from_temp_store(
         self,
@@ -462,7 +531,10 @@ class TrainingHandler(TaskHandler):
             If loading files from temporary store failed.
         """
         if self.temp_store is None:
-            raise ValueError("TempStore is not initialized.")
+            raise CompoxStateError(
+                "TempStore is not initialized.",
+                code="temp_store_not_initialized",
+            )
 
         try:
             data_dicts = self.temp_store.load(
@@ -471,9 +543,17 @@ class TrainingHandler(TaskHandler):
                 *keys,
             )
             return data_dicts
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise ValueError(f"Failed to load files from temporary store: {e}")
+            raise
+        except Exception as e:
+            error = CompoxTrainingError(
+                "Failed to load files from temporary store",
+                code="temp_store_load_failed",
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
     def save_checkpoint(
         self, assets: dict[str, bytes], properties: dict
@@ -502,6 +582,10 @@ class TrainingHandler(TaskHandler):
                 algorithm_id,
                 self.database_connection.list_objects("algorithm-store"),
             )
+            if found_algorithm_key is None:
+                raise ValueError(
+                    f"Parent algorithm {algorithm_id} not found in algorithm-store."
+                )
 
             algorithm_json = json.loads(
                 self.database_connection.get_objects(
@@ -518,10 +602,15 @@ class TrainingHandler(TaskHandler):
 
             for asset_path in assets.keys():
                 if asset_path not in algorithm_assets.keys():
-                    raise ValueError(
+                    raise CompoxCheckpointError(
                         f"Asset path {asset_path} does not exist in the algorithm assets.",
-                        "You can only use asset paths that are already defined in the algorithm.",
-                        f"Existing asset paths: {list(algorithm_assets.keys())}",
+                        code="checkpoint_asset_path_invalid",
+                        details={
+                            "asset_path": asset_path,
+                            "existing_asset_paths": list(
+                                algorithm_assets.keys()
+                            ),
+                        },
                     )
             asset_ids = [generate_uuid() for _ in assets]
             self._post_assets(assets, asset_ids)
@@ -536,9 +625,12 @@ class TrainingHandler(TaskHandler):
                 checkpoint_manifest={
                     "checkpoint_id": checkpoint_id,
                     "parent_algorithm_id": algorithm_id,
+                    "parent_algorithm_key": found_algorithm_key,
                     "training_id": self.task_id,
                     "assets": new_algorithm_assets,
-                    "created_at": str(datetime.now()),
+                    "created_at": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
                     "properties": properties,
                     "tags": training_run_tags,
                     "parent_checkpoint_id": parent_checkpoint_id,
@@ -547,9 +639,17 @@ class TrainingHandler(TaskHandler):
             algorithm_checkpoint.register_checkpoint()
             self.output_checkpoint_ids.append(checkpoint_id)
             return checkpoint_id
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise ValueError(f"Failed to save checkpoint: {e}")
+            raise
+        except Exception as e:
+            error = CompoxCheckpointError(
+                "Failed to save checkpoint",
+                code="checkpoint_save_failed",
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
     def delete_checkpoint(self, checkpoint_id: str) -> None:
         """
@@ -575,9 +675,18 @@ class TrainingHandler(TaskHandler):
                 self.logger.warning(
                     f"Attempted to remove checkpoint id {checkpoint_id} from output_checkpoint_ids, but it was not found in the list."
                 )
-        except Exception as e:
+        except CompoxError as e:
             self.mark_as_failed(e)
-            raise ValueError(f"Failed to delete checkpoint: {e}")
+            raise
+        except Exception as e:
+            error = CompoxCheckpointError(
+                "Failed to delete checkpoint",
+                code="checkpoint_delete_failed",
+                details={"checkpoint_id": checkpoint_id},
+                cause=e,
+            )
+            self.mark_as_failed(error)
+            raise error from e
 
     def mark_as_completed(
         self,
@@ -596,7 +705,9 @@ class TrainingHandler(TaskHandler):
             None
         """
         self.progress = 1.0
-        self.time_completed = str(datetime.now())
+        self.time_completed = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
         self.update_log()
         self.status = "COMPLETED"
         logger.remove(self.logger_sink_id)

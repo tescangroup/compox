@@ -3,7 +3,13 @@ Copyright 2024 TESCAN 3DIM, s.r.o.
 All rights reserved
 """
 
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic import (
+    BaseModel,
+    Field,
+    field_validator,
+    ConfigDict,
+    model_validator,
+)
 from typing import List, Optional
 import numpy as np
 
@@ -18,6 +24,37 @@ class GenericSchema(DataSchema):
 
 class SegmentationSchema(DataSchema):
     mask: np.ndarray
+
+
+class MultiRegionSegmentationSchema(DataSchema):
+    region_names: List[str]
+    region_masks: List[np.ndarray]
+
+    @model_validator(mode="after")
+    def check_region_names(self):
+        if len(self.region_names) != len(self.region_masks):
+            raise ValueError(
+                "Number of region names must match number of region masks."
+            )
+
+        reference_shape = None
+        for i, mask in enumerate(self.region_masks):
+            if not isinstance(mask, np.ndarray):
+                raise ValueError(
+                    f"Region mask at index {i} must be a numpy array."
+                )
+            if mask.ndim != 2:
+                raise ValueError(
+                    f"Region mask at index {i} must be a 2D numpy array."
+                )
+            if reference_shape is None:
+                reference_shape = mask.shape
+            elif mask.shape != reference_shape:
+                raise ValueError(
+                    "All region masks for one output item must have the same "
+                    "shape."
+                )
+        return self
 
 
 class ImageSchema(DataSchema):

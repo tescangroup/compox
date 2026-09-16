@@ -6,14 +6,19 @@ All rights reserved
 import pytest
 import numpy as np
 from unittest.mock import MagicMock
+from pydantic import ValidationError
 
 from compox.algorithm_utils.Image2AlignmentRunner import (
     Image2AlignmentRunner,
 )
+from compox.algorithm_utils.io_schemas import MultiRegionSegmentationSchema
 from compox.algorithm_utils.Image2EmbeddingRunner import (
     Image2EmbeddingRunner,
 )
 from compox.algorithm_utils.Image2ImageRunner import Image2ImageRunner
+from compox.algorithm_utils.Image2MultiRegionSegmentationRunner import (
+    Image2MultiRegionSegmentationRunner,
+)
 from compox.algorithm_utils.Image2SegmentationRunner import (
     Image2SegmentationRunner,
 )
@@ -28,6 +33,12 @@ PREPROCESS_CONFIG = [
     (Image2AlignmentRunner, "image", "_input_images_count", 3),
     (Image2EmbeddingRunner, "image", "_input_images_count", 3),
     (Image2ImageRunner, "image", "_input_images_count", 3),
+    (
+        Image2MultiRegionSegmentationRunner,
+        "image",
+        "_input_images_shape",
+        (3, 2, 2),
+    ),
     (Image2SegmentationRunner, "image", "_input_images_shape", (3, 2, 2)),
     (Segmentation2SegmentationRunner, "mask", "_input_images_count", 3),
 ]
@@ -219,3 +230,179 @@ def test_postprocess_all_runners(
         )
         with pytest.raises(exc):
             runner.postprocess(bad_input, args={})
+
+
+def test_postprocess_image2_multi_region_segmentation_runner(fake_handler):
+    """
+    Verify that multi-region postprocess forwards list[dict] outputs unchanged.
+    """
+
+    class RunnerClass(Image2MultiRegionSegmentationRunner):
+        def inference(self, data, args={}):
+            return data
+
+    current_handler.set(fake_handler)
+    runner = RunnerClass.__new__(RunnerClass)
+    runner.initialize(device="cpu")
+    runner._input_images_shape = (3, 2, 2)
+
+    good_input = [
+        {
+            "region_names": ["a", "b"],
+            "region_masks": [np.zeros((2, 2)), np.ones((2, 2))],
+        },
+        {
+            "region_names": ["c"],
+            "region_masks": [np.full((2, 2), 2)],
+        },
+        {
+            "region_names": [],
+            "region_masks": [],
+        },
+    ]
+
+    out_ids = runner.postprocess(good_input, args={})
+    posted = fake_handler.post_data.call_args[0][0]
+
+    assert posted == good_input
+    assert out_ids == ["id1", "id2"]
+
+
+def test_postprocess_image2_multi_region_segmentation_runner_converts_named_dicts(
+    fake_handler,
+):
+    class RunnerClass(Image2MultiRegionSegmentationRunner):
+        def inference(self, data, args={}):
+            return data
+
+    current_handler.set(fake_handler)
+    runner = RunnerClass.__new__(RunnerClass)
+    runner.initialize(device="cpu")
+    runner._input_images_shape = (3, 2, 2)
+
+    good_input = [
+        {
+            "mid_intensity": np.zeros((2, 2)),
+            "high_intensity": np.ones((2, 2)),
+        },
+        {
+            "foreground": np.full((2, 2), 2),
+        },
+        {},
+    ]
+
+    out_ids = runner.postprocess(good_input, args={})
+    posted = fake_handler.post_data.call_args[0][0]
+
+    assert posted[0]["region_names"] == ["mid_intensity", "high_intensity"]
+    assert posted[1]["region_names"] == ["foreground"]
+    assert posted[2]["region_names"] == []
+    np.testing.assert_array_equal(
+        posted[0]["region_masks"][0], good_input[0]["mid_intensity"]
+    )
+    np.testing.assert_array_equal(
+        posted[0]["region_masks"][1], good_input[0]["high_intensity"]
+    )
+    np.testing.assert_array_equal(
+        posted[1]["region_masks"][0], good_input[1]["foreground"]
+    )
+    assert posted[2]["region_masks"] == []
+    assert out_ids == ["id1", "id2"]
+
+
+def test_postprocess_image2_multi_region_segmentation_runner_rejects_bad_len(
+    fake_handler,
+):
+    class RunnerClass(Image2MultiRegionSegmentationRunner):
+        def inference(self, data, args={}):
+            return data
+
+    current_handler.set(fake_handler)
+    runner = RunnerClass.__new__(RunnerClass)
+    runner.initialize(device="cpu")
+    runner._input_images_shape = (3, 2, 2)
+
+    bad_input = [
+        {"region_names": ["a"], "region_masks": [np.zeros((2, 2))]},
+        {"region_names": ["b"], "region_masks": [np.ones((2, 2))]},
+    ]
+
+    with pytest.raises(ValueError):
+        runner.postprocess(bad_input, args={})
+
+
+def test_postprocess_image2_multi_region_segmentation_runner_rejects_partial_explicit_item(
+    fake_handler,
+):
+    class RunnerClass(Image2MultiRegionSegmentationRunner):
+        def inference(self, data, args={}):
+            return data
+
+    current_handler.set(fake_handler)
+    runner = RunnerClass.__new__(RunnerClass)
+    runner.initialize(device="cpu")
+    runner._input_images_shape = (3, 2, 2)
+
+    bad_input = [
+        {"region_names": ["a"], "region_masks": [np.zeros((2, 2))]},
+        {"region_names": ["b"]},
+        {"region_names": ["c"], "region_masks": [np.ones((2, 2))]},
+    ]
+
+    with pytest.raises(ValueError):
+        runner.postprocess(bad_input, args={})
+
+
+def test_postprocess_image2_multi_region_segmentation_runner_rejects_bad_item(
+    fake_handler,
+):
+    class RunnerClass(Image2MultiRegionSegmentationRunner):
+        def inference(self, data, args={}):
+            return data
+
+    current_handler.set(fake_handler)
+    runner = RunnerClass.__new__(RunnerClass)
+    runner.initialize(device="cpu")
+    runner._input_images_shape = (3, 2, 2)
+
+    bad_input = [
+        {"region_names": ["a"], "region_masks": [np.zeros((2, 2))]},
+        {"region_names": ["b"], "region_masks": []},
+        {"region_names": ["c"], "region_masks": [np.ones((2, 2))]},
+    ]
+
+    with pytest.raises(ValueError):
+        runner.postprocess(bad_input, args={})
+
+
+def test_multi_region_segmentation_schema_rejects_non_array_mask():
+    with pytest.raises(ValidationError):
+        MultiRegionSegmentationSchema.model_validate(
+            {
+                "region_names": ["a"],
+                "region_masks": [[[0, 1], [1, 0]]],
+            }
+        )
+
+
+def test_multi_region_segmentation_schema_rejects_non_2d_mask():
+    with pytest.raises(ValidationError):
+        MultiRegionSegmentationSchema.model_validate(
+            {
+                "region_names": ["a"],
+                "region_masks": [np.zeros((2, 2, 2))],
+            }
+        )
+
+
+def test_multi_region_segmentation_schema_rejects_mismatched_mask_shapes():
+    with pytest.raises(ValidationError):
+        MultiRegionSegmentationSchema.model_validate(
+            {
+                "region_names": ["a", "b"],
+                "region_masks": [
+                    np.zeros((2, 2)),
+                    np.zeros((3, 3)),
+                ],
+            }
+        )

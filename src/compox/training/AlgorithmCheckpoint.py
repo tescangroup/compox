@@ -7,8 +7,17 @@ import json
 from typing import Optional
 from loguru import logger
 from compox.database_connection.BaseConnection import BaseConnection
+from compox.algorithm_utils.AlgorithmStorageMetrics import (
+    AlgorithmStorageMetrics,
+)
 from compox.training.CheckpointManifest import CheckpointManifest
 from compox.server_utils import find_algorithm_by_id
+from compox.exceptions import (
+    CompoxCheckpointError,
+    CompoxError,
+    CompoxNotFoundError,
+    CompoxValidationError,
+)
 
 
 class AlgorithmCheckpoint:
@@ -38,9 +47,10 @@ class AlgorithmCheckpoint:
             self.database_connection = database_connection
 
         if (checkpoint_id is None) == (checkpoint_manifest is None):
-            raise ValueError(
+            raise CompoxValidationError(
                 "Either 'checkpoint_id' or 'checkpoint_manifest' must be provided, "
-                "but not both."
+                "but not both.",
+                code="invalid_checkpoint_initialization",
             )
 
         if checkpoint_manifest:
@@ -79,20 +89,32 @@ class AlgorithmCheckpoint:
                     "algorithm-checkpoint-store", [self.checkpoint_id]
                 )[0]
             )
+        except CompoxError:
+            raise
         except Exception as e:
-            raise FileNotFoundError(
-                f"Failed to load checkpoint manifest with ID {self.checkpoint_id}: {e}"
-            )
+            raise CompoxNotFoundError(
+                f"Failed to load checkpoint manifest with ID {self.checkpoint_id}",
+                code="checkpoint_not_found",
+                details={"checkpoint_id": self.checkpoint_id},
+                cause=e,
+            ) from e
         try:
             checkpoint_manifest = CheckpointManifest.model_validate(
                 checkpoint_manifest
             )
             return checkpoint_manifest
+        except CompoxError:
+            raise
         except Exception as e:
             logger.error(
                 f"Checkpoint manifest with ID {self.checkpoint_id} is invalid: {e}"
             )
-            return None
+            raise CompoxCheckpointError(
+                f"Checkpoint manifest with ID {self.checkpoint_id} is invalid.",
+                code="checkpoint_manifest_invalid",
+                details={"checkpoint_id": self.checkpoint_id},
+                cause=e,
+            ) from e
 
     def register_checkpoint(self) -> bool:
         """
@@ -113,11 +135,18 @@ class AlgorithmCheckpoint:
             self._add_checkpoint_id_to_algorithm_record()
             self._add_checkpoint_id_to_training_record()
             return True
+        except CompoxError:
+            raise
         except Exception as e:
             logger.error(
                 f"Failed to save checkpoint manifest with ID {self.checkpoint_id}: {e}"
             )
-            raise e
+            raise CompoxCheckpointError(
+                "Failed to save checkpoint manifest",
+                code="checkpoint_manifest_save_failed",
+                details={"checkpoint_id": self.checkpoint_id},
+                cause=e,
+            ) from e
 
     def _remove_assets_associated_with_checkpoint(self) -> None:
         """
@@ -129,21 +158,25 @@ class AlgorithmCheckpoint:
                 self.database_connection.delete_objects(
                     "asset-store", asset_ids
                 )
+        except CompoxError:
+            raise
         except Exception as e:
             logger.error(
                 f"Failed to delete assets associated with checkpoint ID {self.checkpoint_id}: {e}"
             )
-            raise e
+            raise CompoxCheckpointError(
+                "Failed to delete assets associated with checkpoint",
+                code="checkpoint_asset_delete_failed",
+                details={"checkpoint_id": self.checkpoint_id},
+                cause=e,
+            ) from e
 
     def _add_checkpoint_id_to_algorithm_record(self) -> None:
         """
         Add the checkpoint ID to the parent algorithm's list of checkpoints.
         """
         try:
-            found_algorithm_key, _, _, _, _ = find_algorithm_by_id(
-                self.checkpoint_manifest.parent_algorithm_id,
-                self.database_connection.list_objects("algorithm-store"),
-            )
+            found_algorithm_key = self._resolve_parent_algorithm_key()
             algorithm_json = json.loads(
                 self.database_connection.get_objects(
                     "algorithm-store",
@@ -154,26 +187,36 @@ class AlgorithmCheckpoint:
                 algorithm_json["checkpoints"] = []
             if self.checkpoint_id not in algorithm_json["checkpoints"]:
                 algorithm_json["checkpoints"].append(self.checkpoint_id)
+                algorithm_json = AlgorithmStorageMetrics(
+                    self.database_connection
+                ).mark_stale(algorithm_json)
                 self.database_connection.put_objects(
                     "algorithm-store",
                     [found_algorithm_key],
                     [json.dumps(algorithm_json)],
                 )
+        except CompoxError:
+            raise
         except Exception as e:
             logger.error(
                 f"Failed to add checkpoint ID {self.checkpoint_id} to algorithm ID {self.checkpoint_manifest.parent_algorithm_id}: {e}"
             )
-            raise e
+            raise CompoxCheckpointError(
+                "Failed to add checkpoint ID to algorithm record",
+                code="checkpoint_algorithm_record_update_failed",
+                details={
+                    "checkpoint_id": self.checkpoint_id,
+                    "algorithm_id": self.checkpoint_manifest.parent_algorithm_id,
+                },
+                cause=e,
+            ) from e
 
     def _remove_checkpoint_id_from_algorithm_record(self) -> None:
         """
         Remove the checkpoint ID from the parent algorithm's list of checkpoints.
         """
         try:
-            found_algorithm_key, _, _, _, _ = find_algorithm_by_id(
-                self.checkpoint_manifest.parent_algorithm_id,
-                self.database_connection.list_objects("algorithm-store"),
-            )
+            found_algorithm_key = self._resolve_parent_algorithm_key()
             algorithm_json = json.loads(
                 self.database_connection.get_objects(
                     "algorithm-store",
@@ -185,16 +228,51 @@ class AlgorithmCheckpoint:
                 and self.checkpoint_id in algorithm_json["checkpoints"]
             ):
                 algorithm_json["checkpoints"].remove(self.checkpoint_id)
+                algorithm_json = AlgorithmStorageMetrics(
+                    self.database_connection
+                ).mark_stale(algorithm_json)
                 self.database_connection.put_objects(
                     "algorithm-store",
                     [found_algorithm_key],
                     [json.dumps(algorithm_json)],
                 )
+        except CompoxError:
+            raise
         except Exception as e:
             logger.error(
                 f"Failed to remove checkpoint ID {self.checkpoint_id} from algorithm ID {self.checkpoint_manifest.parent_algorithm_id}: {e}"
             )
-            raise e
+            raise CompoxCheckpointError(
+                "Failed to remove checkpoint ID from algorithm record",
+                code="checkpoint_algorithm_record_update_failed",
+                details={
+                    "checkpoint_id": self.checkpoint_id,
+                    "algorithm_id": self.checkpoint_manifest.parent_algorithm_id,
+                },
+                cause=e,
+            ) from e
+
+    def _resolve_parent_algorithm_key(self) -> str:
+        """
+        Resolve the parent algorithm-store key for this checkpoint.
+
+        Prefer the key carried in the checkpoint manifest. Fall back to the
+        legacy algorithm-id bucket scan for older manifests.
+        """
+        parent_algorithm_key = self.checkpoint_manifest.parent_algorithm_key
+        if parent_algorithm_key:
+            return parent_algorithm_key
+
+        found_algorithm_key, _, _, _, _ = find_algorithm_by_id(
+            self.checkpoint_manifest.parent_algorithm_id,
+            self.database_connection.list_objects("algorithm-store"),
+        )
+        if found_algorithm_key is None:
+            raise ValueError(
+                "Parent algorithm "
+                f"{self.checkpoint_manifest.parent_algorithm_id} not found in algorithm-store."
+            )
+        return found_algorithm_key
 
     def _add_checkpoint_id_to_training_record(self) -> None:
         """
@@ -218,11 +296,21 @@ class AlgorithmCheckpoint:
                     [self.checkpoint_manifest.training_id],
                     [json.dumps(training_json)],
                 )
+        except CompoxError:
+            raise
         except Exception as e:
             logger.error(
                 f"Failed to add checkpoint ID {self.checkpoint_id} to training ID {self.checkpoint_manifest.training_id}: {e}"
             )
-            raise e
+            raise CompoxCheckpointError(
+                "Failed to add checkpoint ID to training record",
+                code="checkpoint_training_record_update_failed",
+                details={
+                    "checkpoint_id": self.checkpoint_id,
+                    "training_id": self.checkpoint_manifest.training_id,
+                },
+                cause=e,
+            ) from e
 
     def _remove_checkpoint_id_from_training_record(self) -> None:
         """
@@ -247,11 +335,21 @@ class AlgorithmCheckpoint:
                     [self.checkpoint_manifest.training_id],
                     [json.dumps(training_json)],
                 )
+        except CompoxError:
+            raise
         except Exception as e:
             logger.error(
                 f"Failed to remove checkpoint ID {self.checkpoint_id} from training ID {self.checkpoint_manifest.training_id}: {e}"
             )
-            raise e
+            raise CompoxCheckpointError(
+                "Failed to remove checkpoint ID from training record",
+                code="checkpoint_training_record_update_failed",
+                details={
+                    "checkpoint_id": self.checkpoint_id,
+                    "training_id": self.checkpoint_manifest.training_id,
+                },
+                cause=e,
+            ) from e
 
     def delete_checkpoint(self) -> None:
         """
@@ -273,11 +371,18 @@ class AlgorithmCheckpoint:
             self.database_connection.delete_objects(
                 "algorithm-checkpoint-store", [self.checkpoint_id]
             )
+        except CompoxError:
+            raise
         except Exception as e:
             logger.error(
                 f"Could not delete checkpoint {self.checkpoint_id}: {e}"
             )
-            raise e
+            raise CompoxCheckpointError(
+                "Could not delete checkpoint",
+                code="checkpoint_delete_failed",
+                details={"checkpoint_id": self.checkpoint_id},
+                cause=e,
+            ) from e
 
     def add_tags(self, new_tags: list[str]) -> None:
         """

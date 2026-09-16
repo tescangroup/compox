@@ -1,0 +1,17 @@
+[project]
+name = "template_multiregion_segmentation_algorithm"
+version = "1.0.0"
+
+[tool.compox]
+algorithm_type = "Image2MultiRegionSegmentation"
+tags = ["image-segmentation", "multi-region-segmentation"]
+description = "Performs a simple multi-region segmentation of a 3-D image using threshold bands."
+supported_devices = ["cpu", "gpu"]
+default_device = "cpu"
+additional_parameters = [
+    {name = "thresholding_algorithm", displayed_name = "Thresholding algorithm", description = "The thresholding algorithm to use.", config = {type = "string_enum", default = "otsu", options = ["otsu", "mean"], adjustable = true}},
+    {name = "low_region_scale", displayed_name = "Low region scale", description = "Multiplier for the lower threshold band.", config = {type = "float", default = 0.8, min = 0.0, max = 10.0, adjustable = true, decimal_precision = 2}},
+    {name = "high_region_scale", displayed_name = "High region scale", description = "Multiplier for the higher threshold band.", config = {type = "float", default = 1.2, min = 0.0, max = 10.0, adjustable = true, decimal_precision = 2}},
+]
+check_importable = false
+obfuscate = true

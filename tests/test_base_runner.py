@@ -7,6 +7,7 @@ import pytest
 from unittest.mock import MagicMock
 
 from compox.algorithm_utils.BaseRunner import BaseRunner
+from compox.exceptions import CompoxStateError
 
 
 def fake_preprocess(input_data, args):
@@ -123,3 +124,34 @@ def test_preprocess_inference_postprocess(base_runner, monkeypatch):
     assert (
         len(postprocess_output) == 4
     ), f"Expected 'postprocess_base' to return 4 keys ['data', 'pre', 'inf', 'post'], got {list(postprocess_output.keys())}"
+
+
+def test_training_helpers_require_training_handler(base_runner):
+    """
+    Verify training-only runner helpers fail with a typed state error when used
+    with a non-training task handler.
+    """
+    with pytest.raises(CompoxStateError) as exc_info:
+        base_runner.save_checkpoint({"weights": b"123"})
+
+    assert exc_info.value.code == "training_handler_required"
+
+
+# Test 3 - run_benchmark calls benchmark() and persists results
+def test_run_benchmark_calls_benchmark_and_completes(base_runner, monkeypatch, task_handler):
+    """
+    Verify that 'run_benchmark()' calls benchmark() and forwards the returned
+    dict to task_handler.mark_as_completed.
+    """
+    expected_results = {"latency_s": 0.5, "throughput": 2.0}
+
+    def fake_benchmark(args):
+        return expected_results
+
+    monkeypatch.setattr(base_runner, "benchmark", fake_benchmark)
+    task_handler.mark_as_completed = MagicMock()
+
+    result = base_runner.run_benchmark(args={"iterations": 1})
+
+    assert result is None, f"Expected 'run_benchmark()' to return None, got {result!r}"
+    task_handler.mark_as_completed.assert_called_once_with(expected_results)

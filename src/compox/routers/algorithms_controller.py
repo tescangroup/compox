@@ -7,8 +7,7 @@ import json
 import os
 from typing import List, Optional, Union
 from fastapi import APIRouter, Request, Query
-from fastapi.responses import JSONResponse, StreamingResponse
-from starlette.exceptions import HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from starlette.background import BackgroundTask
 
@@ -18,11 +17,13 @@ from compox.pydantic_models import (
     S3ModelFileRecord,
     FailedAlgorithmRegisteredResponse,
 )
-from compox.algorithm_utils.AlgorithmExporter import (
-    AlgorithmNotFoundError,
-    MinorVersionNotFoundError,
-    CheckpointNotFoundError,
-    InvalidCheckpointError,
+from compox.exceptions import (
+    CompoxAlgorithmError,
+    CompoxError,
+    CompoxNotFoundError,
+)
+from compox.algorithm_utils.AlgorithmStorageMetrics import (
+    AlgorithmStorageMetrics,
 )
 
 router = APIRouter(prefix="/api", tags=["algorithms-controller"])
@@ -41,9 +42,7 @@ router = APIRouter(prefix="/api", tags=["algorithms-controller"])
 )
 def get_algorithm(
     algorithm_name: str, algorithm_major_version: str, request: Request
-) -> Union[
-    AlgorithmRegisteredResponse, FailedAlgorithmRegisteredResponse, JSONResponse
-]:
+) -> Union[AlgorithmRegisteredResponse, FailedAlgorithmRegisteredResponse]:
     """
     Returns algorithm by its name and version.
 
@@ -60,33 +59,27 @@ def get_algorithm(
 
     Returns
     -------
-    Union[AlgorithmRegisteredResponse, FailedAlgorithmRegisteredResponse, JSONResponse]
+    Union[AlgorithmRegisteredResponse, FailedAlgorithmRegisteredResponse]
         The algorithm.
     """
     database_connection = request.app.state.database_connection
     algorithm_collection = "algorithm-store"
+    storage_metrics = AlgorithmStorageMetrics(database_connection)
     try:
         # get all algoerithms
         all_algorithms = database_connection.list_objects(algorithm_collection)
 
         if len(all_algorithms) == 0:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "detail": "No algorithms found in the algorithm store"
-                },
+            raise CompoxNotFoundError(
+                "No algorithms found in the algorithm store",
+                code="no_algorithms_found",
             )
 
         # find the algorithm with the requested name and major version
         found_algorithm = None
 
         for key in all_algorithms:
-            algorithm_json = json.loads(
-                database_connection.get_objects(
-                    algorithm_collection,
-                    [key["Key"]],
-                )[0]
-            )
+            algorithm_json = storage_metrics.load_record(key["Key"])
 
             if (
                 algorithm_json["algorithm_name"].lower()
@@ -127,8 +120,12 @@ def get_algorithm(
                     training_parameters=found_algorithm.get(
                         "training_parameters", {}
                     ),
+                    benchmark_outputs=found_algorithm.get(
+                        "benchmark_outputs", []
+                    ),
                     removable=found_algorithm.get("removable", False),
                     exportable=found_algorithm.get("exportable", True),
+                    storage_metrics=found_algorithm.get("storage_metrics"),
                 )
             except ValidationError as e:
                 return FailedAlgorithmRegisteredResponse(
@@ -139,19 +136,22 @@ def get_algorithm(
                     message=f"The algorithm has not been configured correctly.\n{e}",
                 )
         else:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "detail": "Model with the requested name and major version not found in the model store"
+            raise CompoxNotFoundError(
+                "Model with the requested name and major version not found in the model store",
+                code="algorithm_not_found",
+                details={
+                    "algorithm_name": algorithm_name,
+                    "algorithm_major_version": algorithm_major_version,
                 },
             )
-    except Exception as _:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": "Failed to get algorithm due to an internal server error."
-            },
-        )
+    except CompoxError:
+        raise
+    except Exception as e:
+        raise CompoxAlgorithmError(
+            "Failed to get algorithm due to an internal server error.",
+            code="algorithm_read_failed",
+            cause=e,
+        ) from e
 
 
 @router.get(
@@ -195,27 +195,21 @@ async def list_model_files(
 
     database_connection = request.app.state.database_connection
     algorithm_collection = "algorithm-store"
+    storage_metrics = AlgorithmStorageMetrics(database_connection)
 
     try:
         # get all algoerithms
         all_algorithms = database_connection.list_objects(algorithm_collection)
 
         if len(all_algorithms) == 0:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "detail": "No algorithms found in the algorithm store"
-                },
+            raise CompoxNotFoundError(
+                "No algorithms found in the algorithm store",
+                code="no_algorithms_found",
             )
 
         algorithms = []
         for key in all_algorithms:
-            algorithm_json = json.loads(
-                database_connection.get_objects(
-                    algorithm_collection,
-                    [key["Key"]],
-                )[0]
-            )
+            algorithm_json = storage_metrics.load_record(key["Key"])
 
             # check if the algorithm has all the positive tags
             if positive_tags:
@@ -284,21 +278,26 @@ async def list_model_files(
                         training_parameters=algorithm_json.get(
                             "training_parameters", {}
                         ),
+                        benchmark_outputs=algorithm_json.get(
+                            "benchmark_outputs", []
+                        ),
                         removable=algorithm_json.get("removable", False),
                         exportable=algorithm_json.get("exportable", True),
+                        storage_metrics=algorithm_json.get("storage_metrics"),
                     )
                 )
             except ValidationError as _:
                 continue
 
         return algorithms
+    except CompoxError:
+        raise
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": f"Failed to list algorithms due to an internal server error: {e}"
-            },
-        )
+        raise CompoxAlgorithmError(
+            "Failed to list algorithms due to an internal server error.",
+            code="algorithm_list_failed",
+            cause=e,
+        ) from e
 
 
 @router.get(
@@ -359,9 +358,14 @@ async def export_algorithm(
             == str(algorithm_major_version).lower()
         ):
             if not algorithm_json.get("exportable", True):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Algorithm is not exportable.",
+                raise CompoxAlgorithmError(
+                    "Algorithm is not exportable.",
+                    code="algorithm_not_exportable",
+                    http_status=403,
+                    details={
+                        "algorithm_name": algorithm_name,
+                        "algorithm_major_version": str(algorithm_major_version),
+                    },
                 )
             break
 
@@ -378,18 +382,13 @@ async def export_algorithm(
                 algorithm_checkpoint_id=checkpoint_id,
             )
         )
-    except (
-        AlgorithmNotFoundError,
-        MinorVersionNotFoundError,
-        CheckpointNotFoundError,
-    ) as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except InvalidCheckpointError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    except CompoxError:
+        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to export algorithm due to an internal server error.",
+        raise CompoxAlgorithmError(
+            "Failed to export algorithm due to an internal server error.",
+            code="algorithm_export_failed",
+            cause=e,
         ) from e
 
     return StreamingResponse(

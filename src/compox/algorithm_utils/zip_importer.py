@@ -21,6 +21,8 @@ from pathlib import Path
 from types import ModuleType
 from uuid import uuid4
 
+from compox.exceptions import CompoxImportError, CompoxValidationError
+
 
 class ZipImporter:
     """
@@ -238,7 +240,11 @@ class ZipImporter:
         with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as archive:
             for member in archive.namelist():
                 if not cls._is_safe_zip_member(member):
-                    raise ValueError(f"Unsafe zip member path: {member}")
+                    raise CompoxValidationError(
+                        f"Unsafe zip member path: {member}",
+                        code="unsafe_zip_member_path",
+                        details={"member": member},
+                    )
             archive.extractall(target_dir)
         cls._harden_tree_permissions(target_dir)
 
@@ -278,9 +284,14 @@ class ZipImporter:
         for rel_path in sorted(rel_paths):
             fs_path = extract_dir / Path(rel_path)
             if not fs_path.exists() or not fs_path.is_file():
-                raise RuntimeError(
+                raise CompoxImportError(
                     "Module integrity verification failed: expected file "
-                    f"'{rel_path}' missing in '{extract_dir}'."
+                    f"'{rel_path}' missing in '{extract_dir}'.",
+                    code="module_cache_integrity_missing_file",
+                    details={
+                        "relative_path": rel_path,
+                        "extract_dir": str(extract_dir),
+                    },
                 )
             actual[rel_path] = hashlib.sha256(fs_path.read_bytes()).hexdigest()
         return actual
@@ -294,9 +305,11 @@ class ZipImporter:
             module_root, list(expected.keys())
         )
         if actual != expected:
-            raise RuntimeError(
+            raise CompoxImportError(
                 "Module integrity verification failed for "
-                f"module_id='{self.module_id}'."
+                f"module_id='{self.module_id}'.",
+                code="module_cache_integrity_mismatch",
+                details={"module_id": self.module_id},
             )
 
     @classmethod

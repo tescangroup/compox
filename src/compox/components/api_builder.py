@@ -9,10 +9,14 @@ import atexit
 from contextlib import asynccontextmanager
 from concurrent.futures import _base, ThreadPoolExecutor
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.logger import logger as fastapi_logger
+from fastapi.responses import JSONResponse
 from celery import Celery
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from compox.config.server_settings import Settings
 from compox.components.minio_wrapper import MinIOWrapper
@@ -24,6 +28,11 @@ from compox.components.builtin_algorithm_importer import (
 )
 from compox.algorithm_utils.AlgorithmExporter import AlgorithmExporter
 from compox.database_connection.BaseConnection import BaseConnection
+from compox.tasks.TaskHandler import TaskHandler
+from compox.exceptions import (
+    CompoxConfigurationError,
+    CompoxError,
+)
 
 from compox.server_utils import (
     check_and_create_database_collections,
@@ -33,6 +42,7 @@ from compox.algorithm_utils.zip_importer import ZipImporter
 
 from compox.routers import (
     algorithms_controller,
+    benchmark_controller,
     deployment_controller,
     execution_controller,
     execution_manager,
@@ -94,6 +104,7 @@ class ApiBuilder:
             EmergencyRecordStore.default_root_dir(self.settings.log_path)
         )
         app.state.emergency_record_store.purge_all_records()
+        self._register_exception_handlers(app)
         for route in self.routes:
             app.include_router(route)
 
@@ -103,6 +114,75 @@ class ApiBuilder:
             )
 
         return app
+
+    @staticmethod
+    def _register_exception_handlers(app: FastAPI) -> None:
+        """
+        Register Compox-wide API error translation.
+        """
+
+        @app.exception_handler(CompoxError)
+        async def compox_error_handler(
+            request: Request, exc: CompoxError
+        ) -> JSONResponse:
+            if exc.http_status >= 500:
+                return JSONResponse(
+                    status_code=exc.http_status,
+                    content={
+                        "detail": (
+                            "Failed due to an internal server error."
+                        ),
+                        "code": exc.code,
+                        "retryable": exc.retryable,
+                    },
+                )
+
+            return JSONResponse(
+                status_code=exc.http_status,
+                content=exc.to_response_body(),
+            )
+
+        @app.exception_handler(RequestValidationError)
+        async def validation_error_handler(
+            request: Request, exc: RequestValidationError
+        ) -> JSONResponse:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": jsonable_encoder(exc.errors()),
+                    "code": "request_validation_error",
+                    "retryable": False,
+                },
+            )
+
+        @app.exception_handler(StarletteHTTPException)
+        async def http_error_handler(
+            request: Request, exc: StarletteHTTPException
+        ) -> JSONResponse:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={
+                    "detail": exc.detail,
+                    "code": f"http_{exc.status_code}",
+                    "retryable": False,
+                },
+            )
+
+        @app.exception_handler(Exception)
+        async def unexpected_error_handler(
+            request: Request, exc: Exception
+        ) -> JSONResponse:
+            fastapi_logger.exception("Unhandled API exception")
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "detail": (
+                        "Failed due to an internal server error."
+                    ),
+                    "code": "internal_server_error",
+                    "retryable": False,
+                },
+            )
 
 
 # define app context manager
@@ -136,27 +216,31 @@ async def lifespan(app: FastAPI):
     ):
 
         if not os.path.exists(settings.storage.backend_settings.storage_path):
-            raise ValueError("Minio storage path does not exist!")
+            raise CompoxConfigurationError(
+                "Minio storage path does not exist!",
+                code="minio_storage_path_missing",
+            )
 
         minio_wrapper = MinIOWrapper(settings)
         lifecycle_subprocesses["minio"] = minio_wrapper.start(subprocess_fn)
 
-        new_collections = check_and_create_database_collections(
-            [
-                "data-store",
-                "execution-store",
-                "algorithm-store",
-                "module-store",
-                "asset-store",
-                "training-store",
-                "sample-store",
-                "algorithm-checkpoint-store",
-                "stop-requests",
-                "deploy-store",
-                "system-store",
-            ],
-            database_connection=app.state.database_connection,
-        )
+    new_collections = check_and_create_database_collections(
+        [
+            "data-store",
+            "execution-store",
+            "algorithm-store",
+            "module-store",
+            "asset-store",
+            "training-store",
+            "sample-store",
+            "algorithm-checkpoint-store",
+            "stop-requests",
+            "deploy-store",
+            "system-store",
+            "benchmark-store"
+        ],
+        database_connection=app.state.database_connection,
+    )
     if len(new_collections) > 0:
         fastapi_logger.info(f"Created new collections: {new_collections}")
 
@@ -209,6 +293,9 @@ def build_api(settings: Settings, with_lifespan: bool = True) -> FastAPI:
         if storage_path
         else os.path.join(tempfile.gettempdir(), "compox", "module_cache")
     )
+    TaskHandler._ALGORITHM_CACHE_MAXSIZE = (
+        settings.inference.algorithm_cache_maxsize
+    )
     ZipImporter.configure_cache_dir(module_cache_dir)
     atexit.register(ZipImporter.cleanup_cache)
 
@@ -229,7 +316,10 @@ def build_api(settings: Settings, with_lifespan: bool = True) -> FastAPI:
         case "celery":
             task_executor = build_celery(settings)
         case _:
-            raise ValueError("Invalid server backend")
+            raise CompoxConfigurationError(
+                "Invalid server backend",
+                code="invalid_server_backend",
+            )
 
     # build api with lifecycle management
     api_builder = (
@@ -242,6 +332,7 @@ def build_api(settings: Settings, with_lifespan: bool = True) -> FastAPI:
         .with_route(algorithms_controller.router)
         .with_route(deployment_controller.router)
         .with_route(execution_controller.router)
+        .with_route(benchmark_controller.router)
         .with_route(file_controller.router)
         .with_route(file_controller_v1.router)
         .with_route(execution_manager.router)

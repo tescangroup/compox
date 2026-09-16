@@ -15,6 +15,11 @@ from compox.tasks import TaskHandler
 from compox.tasks.context_handler import current_handler
 from compox.training.TrainingHandler import TrainingHandler
 from compox.training.TrainingDataset import TrainingDataset
+from compox.exceptions import (
+    CompoxCheckpointError,
+    CompoxError,
+    CompoxStateError,
+)
 
 
 class BaseRunner(ABC):
@@ -74,7 +79,10 @@ class BaseRunner(ABC):
         """
         task_handler = current_handler.get(None)
         if task_handler is None:
-            raise ValueError("Task handler is not set.")
+            raise CompoxStateError(
+                "Task handler is not set.",
+                code="task_handler_not_set",
+            )
         return task_handler
 
     @property
@@ -267,7 +275,7 @@ class BaseRunner(ABC):
 
         except Exception as e:
             self.task_handler.mark_as_failed(e)
-            raise e
+            raise
 
     def preprocess_base(self, input_data: dict, args: dict = None) -> Any:
         """
@@ -634,10 +642,9 @@ class BaseRunner(ABC):
         tuple[str, str, str]
             The trained algorithm id, name and major version.
         """
-        if not isinstance(self.task_handler, TrainingHandler):
-            raise ValueError(
-                "The task handler is not a TrainingHandler. Training can only be run with a TrainingHandler."
-            )
+        self._require_training_handler(
+            "Training can only be run with a TrainingHandler."
+        )
         if not args:
             args = {}
         self.task_handler.logger.info("Starting training.")
@@ -662,7 +669,7 @@ class BaseRunner(ABC):
 
         except Exception as e:
             self.task_handler.mark_as_failed(e)
-            raise e
+            raise
 
     def train(self, training_data: list[str], args: dict = None) -> None:
         """
@@ -716,10 +723,9 @@ class BaseRunner(ABC):
         ValueError
             If saving the checkpoint fails.
         """
-        if not isinstance(self.task_handler, TrainingHandler):
-            raise ValueError(
-                "The task handler is not a TrainingHandler. Checkpoints can only be saved with a TrainingHandler."
-            )
+        self._require_training_handler(
+            "Checkpoints can only be saved with a TrainingHandler."
+        )
         try:
             checkpoint_id = self.task_handler.save_checkpoint(
                 checkpoint, properties
@@ -728,9 +734,16 @@ class BaseRunner(ABC):
 
         except TaskHandler.TaskStoppedException as _:
             raise
+        except CompoxError:
+            raise
         except Exception as e:
-            self.task_handler.mark_as_failed(e)
-            raise ValueError(f"Failed to save checkpoint: {e}")
+            error = CompoxCheckpointError(
+                "Failed to save checkpoint",
+                code="runner_checkpoint_save_failed",
+                cause=e,
+            )
+            self.task_handler.mark_as_failed(error)
+            raise error from e
 
     def set_state(self, state: dict) -> None:
         """
@@ -789,10 +802,9 @@ class BaseRunner(ABC):
             If training dataset could not be fetched.
         """
 
-        if not isinstance(self.task_handler, TrainingHandler):
-            raise ValueError(
-                "The task handler is not a TrainingHandler. Training datasets can only be fetched with a TrainingHandler."
-            )
+        self._require_training_handler(
+            "Training datasets can only be fetched with a TrainingHandler."
+        )
         dataset = self.task_handler.get_training_dataset(training_sample_ids)
         self.task_handler.logger.info(
             f"Fetched training dataset with {len(dataset)} samples."
@@ -829,10 +841,9 @@ class BaseRunner(ABC):
         list[Path]
             List of the paths to the saved files.
         """
-        if not isinstance(self.task_handler, TrainingHandler):
-            raise ValueError(
-                "The task handler is not a TrainingHandler. Training files can only be saved with a TrainingHandler."
-            )
+        self._require_training_handler(
+            "Training files can only be saved with a TrainingHandler."
+        )
         return self.task_handler.save_training_files_to_temp_store(
             folder_path, files, pydantic_data_schema, parallel
         )
@@ -865,10 +876,9 @@ class BaseRunner(ABC):
         *keys : str
             Optional keys to filter the files to download.
         """
-        if not isinstance(self.task_handler, TrainingHandler):
-            raise ValueError(
-                "The task handler is not a TrainingHandler. Files can only be downloaded with a TrainingHandler."
-            )
+        self._require_training_handler(
+            "Files can only be downloaded with a TrainingHandler."
+        )
         return self.task_handler.download_files_to_temp_store(
             folder_path, file_ids, pydantic_data_schema, batch_size, *keys
         )
@@ -904,10 +914,9 @@ class BaseRunner(ABC):
             as dictionaries following the structure of the sample manifests, but
             with local paths in the temporary store instead of file IDs.
         """
-        if not isinstance(self.task_handler, TrainingHandler):
-            raise ValueError(
-                "The task handler is not a TrainingHandler. Datasets can only be downloaded with a TrainingHandler."
-            )
+        self._require_training_handler(
+            "Datasets can only be downloaded with a TrainingHandler."
+        )
         return self.task_handler.download_dataset_to_temp_store(
             dataset, pydantic_data_schemas
         )
@@ -933,10 +942,9 @@ class BaseRunner(ABC):
             as dictionaries following the structure of the sample manifests, but
             with loaded data dictionaries instead of file IDs.
         """
-        if not isinstance(self.task_handler, TrainingHandler):
-            raise ValueError(
-                "The task handler is not a TrainingHandler. Datasets can only be loaded with a TrainingHandler."
-            )
+        self._require_training_handler(
+            "Datasets can only be loaded with a TrainingHandler."
+        )
         return self.task_handler.load_dataset_from_temp_store(local_samples)
 
     def load_files_from_temp_store(
@@ -963,10 +971,99 @@ class BaseRunner(ABC):
         list[dict]
             The list of loaded data dictionaries.
         """
-        if not isinstance(self.task_handler, TrainingHandler):
-            raise ValueError(
-                "The task handler is not a TrainingHandler. Files can only be loaded with a TrainingHandler."
-            )
+        self._require_training_handler(
+            "Files can only be loaded with a TrainingHandler."
+        )
         return self.task_handler.load_files_from_temp_store(
             paths, parallel, *keys
         )
+
+    def _require_training_handler(self, message: str) -> None:
+        """
+        Ensure the current task handler supports training-only operations.
+        """
+        if not isinstance(self.task_handler, TrainingHandler):
+            raise CompoxStateError(
+                f"The task handler is not a TrainingHandler. {message}",
+                code="training_handler_required",
+            )
+        
+
+    def run_benchmark(self, args: dict = None) -> None:
+        """
+        Run the benchmark pipeline for the algorithm.
+
+        This method drives the full benchmark lifecycle: it calls
+        ``benchmark()`` (which subclasses override to generate dummy data and
+        run inference), records timing, persists the returned result dict via
+        the task handler's ``mark_as_completed`` path, and handles failures
+        consistently with ``run()``.
+
+        Parameters
+        ----------
+        args : dict, optional
+            Additional parameters forwarded to ``benchmark()``.
+
+        Returns
+        -------
+        None
+        """
+        self.task_handler.logger.info("Starting benchmark.")
+        start = time.time()
+        args = args or {}
+        try:
+            results = self.benchmark(args) or {}
+            self.task_handler.logger.info(
+                "Benchmark completed in {} seconds.".format(
+                    round(time.time() - start, 2)
+                )
+            )
+            self.task_handler.mark_as_completed(results)
+            return None
+
+        except TaskHandler.TaskStoppedException:
+            raise
+
+        except Exception as e:
+            self.task_handler.mark_as_failed(e)
+            raise
+
+    def benchmark(self, args: dict = None) -> dict:
+        """
+        Run the benchmark for this algorithm.
+
+        Override this method in a subclass to implement algorithm-specific
+        benchmarking.  The implementation should:
+        1. Generate dummy / synthetic input data without relying on uploaded
+           datasets.
+        2. Run the full inference pipeline (preprocess -> inference ->
+           postprocess or an equivalent subset).
+        3. Collect and return timing and/or quality metrics as a plain dict.
+
+        The returned dict is stored in the ``data`` field of the benchmark
+        record and is available to callers via
+        ``GET /api/v0/benchmarks/{benchmark_id}``.
+
+        Parameters
+        ----------
+        args : dict, optional
+            Additional parameters that were forwarded from the benchmark
+            request.
+
+        Returns
+        -------
+        dict
+            A plain dictionary of benchmark results (e.g. timing in seconds,
+            throughput, accuracy metrics).  Return an empty dict if there are
+            no results to report.
+
+        Raises
+        ------
+        NotImplementedError
+            If the subclass has not implemented this method.
+        """
+        self.task_handler.logger.error(
+            "Benchmarking is not implemented for this algorithm. A benchmark()"
+            " method must be implemented in the Runner subclass."
+        )
+        raise NotImplementedError

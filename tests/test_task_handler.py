@@ -7,13 +7,16 @@ import pytest
 import json
 import io
 import zipfile
+from collections import deque
 from unittest.mock import patch, MagicMock
 from pydantic import BaseModel, ConfigDict, ValidationError
 import numpy as np
 import h5py
 from datetime import datetime
 
+from compox.server_utils import algorithm_cache
 from compox.tasks.TaskHandler import TaskHandler
+from compox.exceptions import CompoxExecutionError, CompoxTaskError
 from compox.tasks.context_handler import current_handler
 
 
@@ -31,6 +34,12 @@ class DummySchema(BaseModel):
 
     array1: np.ndarray
     array2: np.ndarray | None = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+class StringListSchema(BaseModel):
+    region_names: list[str]
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -86,6 +95,129 @@ class Runner:
     return buffer.read()
 
 
+def _clear_task_handler_algorithm_cache() -> None:
+    """
+    Clear the shared TaskHandler algorithm cache between tests.
+    """
+    cache_func = TaskHandler._TaskHandler__cached_fetch_algorithm
+    cache_dict, access_order = _get_algorithm_cache_state(cache_func)
+    cache_dict.clear()
+    access_order.clear()
+
+
+def _get_algorithm_cache_state(cache_func) -> tuple[dict, deque]:
+    """
+    Return the cache dictionary and access-order deque from a decorated method.
+    """
+    cache_dict = None
+    access_order = None
+
+    for cell in cache_func.__closure__ or ():
+        value = cell.cell_contents
+        if isinstance(value, dict):
+            cache_dict = value
+        elif isinstance(value, deque):
+            access_order = value
+
+    if cache_dict is None or access_order is None:
+        raise AssertionError(
+            "Failed to locate algorithm cache state in closure."
+        )
+
+    return cache_dict, access_order
+
+
+def _get_cached_fetch_algorithm_impl():
+    """
+    Return the undecorated TaskHandler cached-fetch implementation from the wrapper closure.
+    """
+    cache_func = TaskHandler._TaskHandler__cached_fetch_algorithm
+    for cell in cache_func.__closure__ or ():
+        value = cell.cell_contents
+        if (
+            callable(value)
+            and getattr(value, "__name__", "") == "__cached_fetch_algorithm"
+        ):
+            return value
+    raise AssertionError(
+        "Failed to locate original __cached_fetch_algorithm implementation."
+    )
+
+
+def _set_task_handler_algorithm_cache_maxsize(
+    monkeypatch, maxsize: int
+) -> None:
+    """
+    Rebind TaskHandler cached algorithm fetch with a test-specific cache size.
+    """
+    monkeypatch.setattr(
+        TaskHandler,
+        "_TaskHandler__cached_fetch_algorithm",
+        algorithm_cache(maxsize=maxsize)(_get_cached_fetch_algorithm_impl()),
+    )
+
+
+def _configure_algorithm_cache_test_store(
+    mock_connection, algorithms: dict
+) -> None:
+    """
+    Configure mocked algorithm/module storage for multiple algorithm cache tests.
+    """
+    original_get_objects = mock_connection.get_objects.side_effect
+
+    algorithm_records = {}
+    module_archives = {}
+
+    for algorithm_id, version in algorithms.items():
+        algorithm_key = f"{algorithm_id}~{algorithm_id}_name~1"
+        module_id = f"module_{algorithm_id}"
+        algorithm_records[algorithm_key] = {
+            "algorithm_id": algorithm_id,
+            "algorithm_name": f"{algorithm_id}_name",
+            "algorithm_major_version": "1",
+            "supported_devices": ["cpu"],
+            "default_device": "cpu",
+            "latest_algorithm_minor_version": "0",
+            "algorithm_minor_version": {
+                "0": {
+                    "module_id": module_id,
+                    "assets": {
+                        f"asset-{algorithm_id}": f"asset-{algorithm_id}"
+                    },
+                }
+            },
+        }
+        module_archives[module_id] = _create_runner_zip_with_version(version)
+
+    def list_objects(bucket):
+        if bucket == "algorithm-store":
+            return [{"Key": key} for key in algorithm_records]
+        if bucket == "module-store":
+            return [{"Key": key} for key in module_archives]
+        return []
+
+    def get_objects(bucket, keys):
+        if bucket == "algorithm-store":
+            return [json.dumps(algorithm_records[keys[0]])]
+        if bucket == "module-store":
+            return [module_archives[keys[0]]]
+        return original_get_objects(bucket, keys)
+
+    mock_connection.list_objects.side_effect = list_objects
+    mock_connection.get_objects.side_effect = get_objects
+
+
+def _count_bucket_reads(mock_connection, bucket_name: str) -> int:
+    """
+    Count how many times a specific storage bucket was read during a test.
+    """
+    return sum(
+        1
+        for call in mock_connection.get_objects.call_args_list
+        if call.args[0] == bucket_name
+    )
+
+
 def verify_storage_and_get_saved_json(mock_connection):
     """
     Retrieve the last JSON payload passed to `put_objects` and returns the resulting dict.
@@ -114,6 +246,18 @@ def handler_with_session(task_handler):
     session = DummySession()
     task_handler.task_session = session
     return task_handler, session
+
+
+@pytest.fixture(autouse=True)
+def reset_task_handler_algorithm_cache_state():
+    """
+    Reset the shared TaskHandler algorithm cache configuration between tests.
+    """
+    TaskHandler._ALGORITHM_CACHE_MAXSIZE = 1
+    _clear_task_handler_algorithm_cache()
+    yield
+    TaskHandler._ALGORITHM_CACHE_MAXSIZE = 1
+    _clear_task_handler_algorithm_cache()
 
 
 # test 1 - progress, status, dataset_ids, session_token
@@ -228,6 +372,29 @@ def test_mark_as_failed(task_handler, mock_connection):
         pytest.fail(f"'time_completed' is not valid ISO-formatted date/time")
 
 
+def test_mark_as_failed_persists_structured_error_payload(
+    task_handler, mock_connection
+):
+    cause = RuntimeError("db write failed")
+    error = CompoxTaskError(
+        "Failed to update task record.",
+        code="task_record_update_failed",
+        details={"field": "progress"},
+        cause=cause,
+    )
+
+    task_handler.mark_as_failed(error)
+
+    payload = verify_storage_and_get_saved_json(mock_connection)
+    assert payload["error"]["type"] == "CompoxTaskError"
+    assert payload["error"]["code"] == "task_record_update_failed"
+    assert payload["error"]["details"] == {"field": "progress"}
+    assert payload["error"]["cause"] == {
+        "type": "RuntimeError",
+        "message": "db write failed",
+    }
+
+
 # Test 4 - Test Invalid Progress and Status
 def test_invalid_progress_raises(task_handler):
     """
@@ -239,6 +406,23 @@ def test_invalid_progress_raises(task_handler):
         task_handler.progress = 1.1
     with pytest.raises(ValueError):
         task_handler.status = " "
+
+
+def test_task_record_update_failure_is_typed(task_handler):
+    """
+    Verify task-record update failures use one typed exception path.
+    """
+    with patch.object(
+        task_handler,
+        "_save_task_record",
+        side_effect=RuntimeError("database write failed"),
+    ):
+        with pytest.raises(CompoxTaskError) as exc_info:
+            task_handler.progress = 0.5
+
+    assert exc_info.value.code == "task_record_update_failed"
+    assert exc_info.value.details == {"field": "progress"}
+    assert isinstance(exc_info.value.cause, RuntimeError)
 
 
 # Test 5 - Test Fetch Algorithm
@@ -290,12 +474,7 @@ def test_cached_fetch_algorithm_uses_cache(task_handler, mock_connection):
     """
     Verify that the private cached fetch algorithm method caches after first call.
     """
-    # Start with cleared Cache
-    cache_func = TaskHandler._TaskHandler__cached_fetch_algorithm
-    cache_dict = cache_func.__closure__[0].cell_contents
-    access_order = cache_func.__closure__[1].cell_contents
-    cache_dict.clear()
-    access_order.clear()
+    _clear_task_handler_algorithm_cache()
 
     class DummyRunner:
         def __new__(cls):
@@ -327,12 +506,79 @@ def test_cached_fetch_algorithm_uses_cache(task_handler, mock_connection):
     assert (
         mock_import.call_count == 1
     ), f"Expected ZipImporter to be invoked once due to cache hit, got {mock_import.call_count}"
-    assert (
-        calls_second - calls_first == 2
-    ), (
+    assert calls_second - calls_first == 2, (
         "Expected one extra algorithm metadata fetch and one task-record fetch "
         f"on second call, got {calls_second - calls_first}"
     )
+
+
+def test_cached_fetch_algorithm_reuses_multiple_cached_algorithms(
+    task_handler, mock_connection, monkeypatch
+):
+    """
+    Verify TaskHandler can reuse more than one cached runner when cache capacity allows it.
+    """
+    _set_task_handler_algorithm_cache_maxsize(monkeypatch, maxsize=3)
+    _clear_task_handler_algorithm_cache()
+    _configure_algorithm_cache_test_store(
+        mock_connection,
+        {
+            "alg-a": "version-a",
+            "alg-b": "version-b",
+        },
+    )
+
+    runner_a_first = task_handler.fetch_algorithm("alg-a")
+    runner_b_first = task_handler.fetch_algorithm("alg-b")
+    runner_a_second = task_handler.fetch_algorithm("alg-a")
+
+    assert getattr(runner_a_first, "VERSION", None) == "version-a"
+    assert getattr(runner_b_first, "VERSION", None) == "version-b"
+    assert (
+        runner_a_first is runner_a_second
+    ), "Expected alg-a runner to be reused from cache after switching to alg-b"
+    assert (
+        runner_a_first is not runner_b_first
+    ), "Expected different algorithms to keep distinct runner instances in cache"
+    assert (
+        _count_bucket_reads(mock_connection, "module-store") == 2
+    ), "Expected module-store to be read only for the first fetch of each unique algorithm"
+
+
+def test_cached_fetch_algorithm_evicts_least_recently_used_runner(
+    task_handler, mock_connection, monkeypatch
+):
+    """
+    Verify TaskHandler evicts the least recently used runner when cache capacity is exceeded.
+    """
+    _set_task_handler_algorithm_cache_maxsize(monkeypatch, maxsize=3)
+    _clear_task_handler_algorithm_cache()
+    _configure_algorithm_cache_test_store(
+        mock_connection,
+        {
+            "alg-a": "version-a",
+            "alg-b": "version-b",
+            "alg-c": "version-c",
+            "alg-d": "version-d",
+        },
+    )
+
+    runner_a_first = task_handler.fetch_algorithm("alg-a")
+    runner_b_first = task_handler.fetch_algorithm("alg-b")
+    task_handler.fetch_algorithm("alg-c")
+    runner_b_second = task_handler.fetch_algorithm("alg-b")
+    task_handler.fetch_algorithm("alg-d")
+    runner_a_second = task_handler.fetch_algorithm("alg-a")
+
+    assert (
+        runner_b_first is runner_b_second
+    ), "Expected alg-b to remain cached after being accessed again before eviction"
+    assert (
+        runner_a_first is not runner_a_second
+    ), "Expected alg-a runner to be evicted and re-imported after cache overflow"
+    assert (
+        _count_bucket_reads(mock_connection, "module-store") == 5
+    ), "Expected five module-store reads including one re-read after alg-a eviction"
 
 
 def test_fetch_algorithm_resolves_new_latest_minor_when_minor_is_none(
@@ -342,12 +588,7 @@ def test_fetch_algorithm_resolves_new_latest_minor_when_minor_is_none(
     If latest minor changes in storage and caller passes algorithm_minor_version=None,
     fetch_algorithm should load the new latest module (not stale cached one).
     """
-    # Clear algorithm cache for isolation.
-    cache_func = TaskHandler._TaskHandler__cached_fetch_algorithm
-    cache_dict = cache_func.__closure__[0].cell_contents
-    access_order = cache_func.__closure__[1].cell_contents
-    cache_dict.clear()
-    access_order.clear()
+    _clear_task_handler_algorithm_cache()
 
     algorithm_id = "alg-latest-cache-test"
     algorithm_key = f"{algorithm_id}~cache_test_algo~1"
@@ -397,6 +638,205 @@ def test_fetch_algorithm_resolves_new_latest_minor_when_minor_is_none(
         algorithm_id, algorithm_minor_version=None
     )
     assert getattr(runner_second, "VERSION", None) == "v1"
+
+
+def test_cached_fetch_algorithm_uses_distinct_entries_for_device_override(
+    task_handler, mock_connection
+):
+    """
+    Verify different execution_device_override values do not reuse the same cache entry.
+    """
+    _clear_task_handler_algorithm_cache()
+
+    algorithm_key = "alg-device-cache-test~cache_test_algo~1"
+    module_archive = _create_runner_zip_with_version("device-test")
+
+    def list_objects(bucket):
+        if bucket == "algorithm-store":
+            return [{"Key": algorithm_key}]
+        if bucket == "module-store":
+            return [{"Key": "module_device"}]
+        return []
+
+    def get_objects(bucket, keys):
+        if bucket == "algorithm-store":
+            return [
+                json.dumps(
+                    {
+                        "algorithm_id": "alg-device-cache-test",
+                        "algorithm_name": "cache_test_algo",
+                        "algorithm_major_version": "1",
+                        "supported_devices": ["cpu", "gpu"],
+                        "default_device": "cpu",
+                        "latest_algorithm_minor_version": "0",
+                        "algorithm_minor_version": {
+                            "0": {
+                                "module_id": "module_device",
+                                "assets": {},
+                            }
+                        },
+                    }
+                )
+            ]
+        if bucket == "module-store":
+            return [module_archive]
+        return [json.dumps({})]
+
+    mock_connection.list_objects.side_effect = list_objects
+    mock_connection.get_objects.side_effect = get_objects
+
+    with patch(
+        "compox.tasks.TaskHandler.check_system_gpu_availability",
+        return_value=(True, 1),
+    ):
+        runner_cpu = task_handler.fetch_algorithm(
+            "alg-device-cache-test", execution_device_override="cpu"
+        )
+        runner_gpu = task_handler.fetch_algorithm(
+            "alg-device-cache-test", execution_device_override="gpu"
+        )
+
+    assert (
+        runner_cpu is not runner_gpu
+    ), "Expected CPU and GPU overrides to use distinct cached runner entries"
+    assert (
+        _count_bucket_reads(mock_connection, "module-store") == 2
+    ), "Expected module-store to be read once per device override variant"
+
+
+def test_cached_fetch_algorithm_uses_distinct_entries_for_checkpoint_id(
+    task_handler, mock_connection
+):
+    """
+    Verify different checkpoint_id values do not reuse the same cache entry.
+    """
+    _clear_task_handler_algorithm_cache()
+
+    algorithm_key = "alg-checkpoint-cache-test~cache_test_algo~1"
+    module_archive = _create_runner_zip_with_version("checkpoint-test")
+
+    def list_objects(bucket):
+        if bucket == "algorithm-store":
+            return [{"Key": algorithm_key}]
+        if bucket == "module-store":
+            return [{"Key": "module_checkpoint"}]
+        return []
+
+    def get_objects(bucket, keys):
+        if bucket == "algorithm-store":
+            return [
+                json.dumps(
+                    {
+                        "algorithm_id": "alg-checkpoint-cache-test",
+                        "algorithm_name": "cache_test_algo",
+                        "algorithm_major_version": "1",
+                        "supported_devices": ["cpu"],
+                        "default_device": "cpu",
+                        "latest_algorithm_minor_version": "0",
+                        "algorithm_minor_version": {
+                            "0": {
+                                "module_id": "module_checkpoint",
+                                "assets": {"base-asset": "asset-base"},
+                            }
+                        },
+                    }
+                )
+            ]
+        if bucket == "module-store":
+            return [module_archive]
+        return [json.dumps({})]
+
+    mock_connection.list_objects.side_effect = list_objects
+    mock_connection.get_objects.side_effect = get_objects
+
+    def checkpoint_factory(checkpoint_id, database_connection):
+        checkpoint = MagicMock()
+        checkpoint.checkpoint_manifest.assets = {
+            "base-asset": f"asset-{checkpoint_id}"
+        }
+        return checkpoint
+
+    with patch(
+        "compox.tasks.TaskHandler.AlgorithmCheckpoint",
+        side_effect=checkpoint_factory,
+    ):
+        runner_a = task_handler.fetch_algorithm(
+            "alg-checkpoint-cache-test", checkpoint_id="checkpoint-a"
+        )
+        runner_b = task_handler.fetch_algorithm(
+            "alg-checkpoint-cache-test", checkpoint_id="checkpoint-b"
+        )
+
+    assert (
+        runner_a is not runner_b
+    ), "Expected different checkpoint ids to use distinct cached runner entries"
+    assert (
+        _count_bucket_reads(mock_connection, "module-store") == 2
+    ), "Expected module-store to be read once per checkpoint variant"
+
+
+def test_cached_fetch_algorithm_default_maxsize_one_evicts_previous_runner(
+    task_handler, mock_connection
+):
+    """
+    Verify the shipped TaskHandler cache size of one evicts the previous runner.
+    """
+    _clear_task_handler_algorithm_cache()
+    _configure_algorithm_cache_test_store(
+        mock_connection,
+        {
+            "alg-a": "version-a",
+            "alg-b": "version-b",
+        },
+    )
+
+    runner_a_first = task_handler.fetch_algorithm("alg-a")
+    runner_b = task_handler.fetch_algorithm("alg-b")
+    runner_a_second = task_handler.fetch_algorithm("alg-a")
+
+    assert getattr(runner_a_first, "VERSION", None) == "version-a"
+    assert getattr(runner_b, "VERSION", None) == "version-b"
+    assert (
+        runner_a_first is not runner_a_second
+    ), "Expected alg-a to be evicted after caching alg-b with maxsize=1"
+    assert (
+        _count_bucket_reads(mock_connection, "module-store") == 3
+    ), "Expected module-store re-read after the default single-entry cache evicts alg-a"
+
+
+def test_task_handler_class_cache_size_controls_algorithm_cache(
+    mock_connection,
+):
+    """
+    Verify TaskHandler cache capacity follows the configured class attribute.
+    """
+    TaskHandler._ALGORITHM_CACHE_MAXSIZE = 1
+    _clear_task_handler_algorithm_cache()
+    TaskHandler._ALGORITHM_CACHE_MAXSIZE = 2
+    handler = TaskHandler(
+        task_id="test-task-id",
+        database_connection=mock_connection,
+        database_update=True,
+    )
+    _clear_task_handler_algorithm_cache()
+    _configure_algorithm_cache_test_store(
+        mock_connection,
+        {
+            "alg-a": "version-a",
+            "alg-b": "version-b",
+        },
+    )
+
+    runner_a_first = handler.fetch_algorithm("alg-a")
+    handler.fetch_algorithm("alg-b")
+    runner_a_second = handler.fetch_algorithm("alg-a")
+
+    assert (
+        runner_a_first is runner_a_second
+    ), "Expected TaskHandler class cache size to allow two cached runners"
+
+    TaskHandler._ALGORITHM_CACHE_MAXSIZE = 1
+    _clear_task_handler_algorithm_cache()
 
 
 # Test 7 – Fetch Asset
@@ -607,6 +1047,42 @@ def test_post_data(task_handler, mock_connection):
             ), f"Expected 'array2' missing, keys: {list(f2.keys())!r}"
 
 
+def test_post_and_fetch_data_roundtrip_string_list(task_handler, mock_connection):
+    stored_data = {}
+    original_get_objects = mock_connection.get_objects.side_effect
+
+    def put_objects(bucket, keys, values):
+        if bucket == "execution-store":
+            return True
+        if bucket == "data-store":
+            for key, value in zip(keys, values):
+                stored_data[key] = value
+            return True
+        raise ValueError(f"Unexpected bucket {bucket!r}")
+
+    def get_objects(bucket, keys):
+        if bucket == "data-store":
+            return [stored_data[key] for key in keys]
+        return original_get_objects(bucket, keys)
+
+    mock_connection.put_objects.side_effect = put_objects
+    mock_connection.get_objects.side_effect = get_objects
+
+    with patch("compox.tasks.TaskHandler.generate_uuid") as mock_uuid:
+        mock_uuid.return_value = "string-list-id"
+        out_ids = task_handler.post_data(
+            [{"region_names": ["mid_intensity", "high_intensity"]}],
+            StringListSchema,
+        )
+
+    assert out_ids == ["string-list-id"]
+
+    result = task_handler.fetch_data(out_ids, StringListSchema)
+    assert result == [
+        {"region_names": ["mid_intensity", "high_intensity"]}
+    ]
+
+
 # Test 13 - Post invalid data
 def test_post_data_validation_error(task_handler):
     """
@@ -627,7 +1103,7 @@ def test_post_data_storage_exception(task_handler, mock_connection):
     Verify post_data propagates storage exceptions.
     """
     mock_connection.put_objects.side_effect = RuntimeError("S3 down")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(CompoxExecutionError):
         task_handler.post_data(
             [{"array1": np.array([0]), "array2": np.array([1])}], DummySchema
         )

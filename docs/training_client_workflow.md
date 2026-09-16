@@ -156,6 +156,62 @@ Notes:
 
 ---
 
+### Benchmark algorithm (optional pre-check)
+
+Endpoint:
+- `POST /api/v0/benchmark-algorithm`
+
+Payload model: `IncomingBenchmarkRequest`
+- `algorithm_id`: string
+- `additional_parameters`: dict
+
+Example:
+```json
+{
+  "algorithm_id": "<algorithm_id>",
+  "additional_parameters": {
+    "sigma": 5,
+    "winsize": 9
+  }
+}
+```
+
+Response:
+```json
+{ "benchmark_id": "..." }
+```
+
+Status endpoint:
+- `GET /api/v0/benchmarks/{benchmark_id}`
+
+Response model: `BenchmarkRecord`
+- Includes `status`, `time_started`, `time_completed`, `log`, and `data`.
+
+Example status response (shape):
+```json
+{
+  "benchmark_id": "...",
+  "algorithm_id": "...",
+  "additional_parameters": {
+    "sigma": 5,
+    "winsize": 9
+  },
+  "status": "COMPLETED",
+  "time_started": "...",
+  "time_completed": "...",
+  "log": "...",
+  "data": {}
+}
+```
+
+Notes:
+- This step is useful as a pre-check before starting long-running training jobs.
+- Valid statuses are `PENDING`, `STARTED`, `RUNNING`, `COMPLETED`, `FAILED`, `STOPPED`.
+- Benchmark records are initialized with `status="PENDING"` and `time_started`.
+- On terminal states (`COMPLETED`, `FAILED`, `STOPPED`), `time_completed` is filled.
+
+---
+
 ### Stop training (optional)
 
 Endpoint:
@@ -247,7 +303,8 @@ What the zip file is:
 
 1. Upload HDF5 files → get `file_id`s
 2. Create training sample(s) referencing file IDs → get `sample_id`s
-3. Start training with algorithm ID + sample IDs → get `training_id`
-4. Poll training record → read status + `output_checkpoint_ids`
-5. Optionally stop training or fetch checkpoint metadata
-6. Optionally export an algorithm package using checkpoint ID
+3. Optionally benchmark algorithm (`/benchmark-algorithm`) and poll benchmark record (`/benchmarks/{id}`)
+4. Start training with algorithm ID + sample IDs → get `training_id`
+5. Poll training record → read status + `output_checkpoint_ids`
+6. Optionally stop training or fetch checkpoint metadata
+7. Optionally export an algorithm package using checkpoint ID
